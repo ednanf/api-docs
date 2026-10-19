@@ -1403,17 +1403,24 @@ components:
             `2025-03-01T10:00:00Z`). Local timestamps and explicit offsets such as `+02:00` are rejected
             with `400 Date must be a valid ISO datetime string.`
           example: "2025-03-01T10:00:00.000Z"
-      allOf:
-        - if:
-            properties:
-              status:
-                const: completed
-            required: [status]
-          then:
+      oneOf:
+        - title: Completed entry
+          description: |
+            `status` is `completed`, so a `rating` is required.
+          required: [status, rating]
+          properties:
+            status:
+              const: completed
+        - title: Entry that is not completed
+          description: |
+            `status` is not `completed`, so a `rating` must not be present.
+          required: [status]
+          not:
             required: [rating]
-          else:
-            not:
-              required: [rating]
+          properties:
+            status:
+              not:
+                const: completed
 
     JournalEntryPatchRequest:
       type: object

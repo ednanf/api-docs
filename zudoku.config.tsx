@@ -9,12 +9,30 @@ const config: ZudokuConfig = {
       width: "130px",
     },
   },
+  syntaxHighlighting: {
+    themes: {
+      light: "github-light",
+      dark: "github-dark",
+    },
+    languages: [
+      "html",
+      "javascript",
+      "typescript",
+      "css",
+      "go",
+      "markdown",
+      "json",
+      "shell",
+      "bash",
+      "http",
+    ],
+  },
   navigation: [
     {
       type: "custom-page",
       path: "/",
       label: "Home",
-      display: "hide",
+      display: "always",
       layout: "none",
       element: <HomePage />,
     },
@@ -25,8 +43,23 @@ const config: ZudokuConfig = {
     },
     {
       type: "link",
-      label: "Petstore (Example)",
-      to: "/api/petstore",
+      label: "Game Journal V2",
+      to: "/api/game-journal-v2",
+    },
+    {
+      type: "link",
+      label: "Mini community",
+      to: "/api/mini-community",
+    },
+    {
+      type: "link",
+      label: "Game Journal",
+      to: "/api/game-journal",
+    },
+    {
+      type: "link",
+      label: "MERN Task Manager",
+      to: "/api/mern-task-manager",
     },
   ],
   catalogs: {
