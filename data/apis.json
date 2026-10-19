@@ -1,0 +1,14 @@
+[
+  {
+    "title": "School API",
+    "description": "API reference for the school management system.",
+    "href": "/api/school-api",
+    "linkLabel": "Explore API"
+  },
+  {
+    "title": "Petstore (Example)",
+    "description": "Example API reference, kept temporarily for testing.",
+    "href": "/api/petstore",
+    "linkLabel": "Explore API"
+  }
+]
