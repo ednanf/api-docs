@@ -1,4 +1,5 @@
 import type { ZudokuConfig } from "zudoku";
+import HomePage from "./pages/home";
 
 const config: ZudokuConfig = {
   site: {
@@ -10,55 +11,38 @@ const config: ZudokuConfig = {
   },
   navigation: [
     {
-      type: "category",
-      label: "Documentation",
-      items: [
-        {
-          type: "category",
-          label: "Getting Started",
-          icon: "sparkles",
-          items: [
-            "/introduction",
-            {
-              type: "link",
-              icon: "folder-cog",
-              badge: {
-                label: "New",
-                color: "purple",
-              },
-              label: "API Reference",
-              to: "/api",
-            },
-          ],
-        },
-        {
-          type: "category",
-          label: "Useful Links",
-          collapsible: false,
-          icon: "link",
-          items: [
-            {
-              type: "link",
-              icon: "book",
-              label: "Zudoku Docs",
-              to: "https://zudoku.dev/docs/",
-            },
-          ],
-        },
-      ],
+      type: "custom-page",
+      path: "/",
+      label: "Home",
+      display: "hide",
+      layout: "none",
+      element: <HomePage />,
     },
     {
       type: "link",
-      to: "/api",
-      label: "API Reference",
+      label: "School API",
+      to: "/api/school-api",
+    },
+    {
+      type: "link",
+      label: "Petstore (Example)",
+      to: "/api/petstore",
     },
   ],
-  redirects: [{ from: "/", to: "/introduction" }],
+  catalogs: {
+    path: "/catalog",
+    label: "API Catalog",
+  },
   apis: [
     {
       type: "file",
-      input: "./apis/openapi.yaml",
-      path: "/api",
+      input: "./apis/petstore/openapi.yaml",
+      path: "/api/petstore",
+    },
+    {
+      type: "file",
+      input: "./apis/school-api/openapi.yml",
+      path: "/api/school-api",
     },
   ],
 };
