@@ -9,8 +9,9 @@ export default function HomePage() {
         Explore the APIs behind my projects, including endpoint references and
         request and response schemas.
       </p>
-      // NOTE: Add new projects' metadata in /data/apis.json and the openapi.yml
-      files in apis/`project-name`/openapi.yml
+      // NOTE: Add new projects' metadata in /data/apis.json, the openapi.yml
+      files in apis/`project-name`/openapi.yml and register it in
+      zudoku.config.tsx
       <div className="mt-10 grid gap-4 sm:grid-cols-2">
         {apis.map((api) => (
           <ApiCard key={api.href} {...api} />
