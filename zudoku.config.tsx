@@ -9,7 +9,6 @@ const config: ZudokuConfig = {
       width: "130px",
     },
   },
-  basePath: "/",
   navigation: [
     {
       type: "custom-page",
