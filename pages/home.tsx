@@ -10,7 +10,7 @@ export default function HomePage() {
 
       <div className="mt-10 grid gap-4 sm:grid-cols-2">
         <a
-          href="/api-docs/api/school-api"
+          href="/docs/api/school-api"
           className="rounded-lg border p-6 transition hover:bg-muted"
         >
           <h2 className="text-xl font-semibold">School API</h2>
@@ -21,7 +21,7 @@ export default function HomePage() {
         </a>
 
         <a
-          href="/api-docs/api/petstore"
+          href="/docs/api/petstore"
           className="rounded-lg border p-6 transition hover:bg-muted"
         >
           <h2 className="text-xl font-semibold">Petstore (Example)</h2>
