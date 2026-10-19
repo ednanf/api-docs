@@ -36,13 +36,28 @@ const config: ZudokuConfig = {
   apis: [
     {
       type: "file",
-      input: "./apis/petstore/openapi.yaml",
-      path: "/api/petstore",
+      input: "./apis/school-api/openapi.yaml",
+      path: "/api/school-api",
     },
     {
       type: "file",
-      input: "./apis/school-api/openapi.yml",
-      path: "/api/school-api",
+      input: "./apis/game-journal-v2/openapi.yaml",
+      path: "/api/game-journal-v2",
+    },
+    {
+      type: "file",
+      input: "./apis/mini-community/openapi.yaml",
+      path: "api/mini-community",
+    },
+    {
+      type: "file",
+      input: "./apis/game-journal/openapi.yaml",
+      path: "api/game-journal",
+    },
+    {
+      type: "file",
+      input: "./apis/mern-task-manager/openapi.yaml",
+      path: "api/mern-task-manager",
     },
   ],
 };

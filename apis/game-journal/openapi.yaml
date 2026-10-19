@@ -1,0 +1,1635 @@
+openapi: 3.0.3
+
+info:
+  title: Game Journal API
+  version: 1.0.1
+  description: |
+    REST API for the **Game Journal** application — a personal gaming journal that lets
+    users log the games they play, the platform they play on, the status of each game and
+    a personal rating, and browse aggregated statistics about their backlog.
+
+    The API is implemented with **Node.js + Express 5 + TypeScript** and stores data in
+    **MongoDB** through **Mongoose 8**. Authentication is stateless and based on
+    **JWT (HS256)** tokens; passwords are hashed with **bcrypt** (10 salt rounds).
+
+    ---
+
+    ## Base URL
+
+    Every endpoint lives under the `/api/v1` prefix. The frontend talks to the backend
+    through an Axios instance whose `baseURL` already contains `/api/v1`, so request
+    paths in this document are relative to that prefix
+    (for example `/users/login` means `POST {server}/api/v1/users/login`).
+
+    ## Response envelope
+
+    Every JSON response produced by the application code (success **and** error) uses the
+    same envelope:
+
+    ```json
+    {
+      "status": "success",
+      "data": { }
+    }
+    ```
+
+    * `status` — `"success"` or `"error"`.
+    * `data` — the payload of the response. On errors it always contains a `message`
+      string describing what went wrong.
+
+    Two exceptions to this rule are documented explicitly:
+
+    * **429 Too Many Requests** — emitted by the rate limiter *before* the application
+      error handler runs. Its body is **not** wrapped in the envelope
+      (`{"status": 429, "error": "Too many requests, please try again later."}`).
+    * **404 Not Found (unknown route)** — still uses the standard envelope, with the
+      message `Not Found - {originalUrl}`.
+
+    ## Authentication
+
+    Endpoints under `/journal-entries` and `DELETE /users/delete` are protected. Send the
+    JWT returned by `/users/register` or `/users/login` in the `Authorization` header:
+
+    ```
+    Authorization: Bearer <token>
+    ```
+
+    The token payload contains a single custom claim, `userId`, which holds the
+    hexadecimal string representation of the user's MongoDB `_id`:
+
+    ```json
+    { "userId": "507f1f77bcf86cd799439011", "iat": 1705314600, "exp": 1705919400 }
+    ```
+
+    Tokens are signed with `HS256` and expire after the lifetime configured in the
+    `JWT_LIFETIME` environment variable (for example `7d`).
+
+    The API always answers with **401 Unauthorized** and a descriptive message when the
+    header is missing or malformed, the token is invalid/expired/tampered with, or the
+    token payload does not contain a `userId` claim.
+
+    ## Request processing pipeline
+
+    Every request goes through the following middleware chain, in this order:
+
+    1. `express.json()` — parses JSON bodies.
+    2. `cors()` — allows the configured front-end origins (`GET`, `POST`, `PATCH`, `DELETE`).
+    3. `rateLimit()` — 300 requests per IP per 15-minute window.
+    4. `helmet()` — sets the standard security headers.
+    5. `morgan('tiny')` — request logging.
+    6. Route level, in this order:
+       * `POST /users/register`, `POST /users/login` — `xss()` (sanitizes the body,
+         query and params) → `validateZodSchemas()` (validates the body and **strips
+         unknown properties**) → controller.
+       * `DELETE /users/delete` — `authenticate()` (verifies the JWT) → controller.
+       * `GET`/`POST /journal-entries` — `authenticate()` → (`xss()` →
+         `validateZodSchemas()` for `POST`) → controller.
+       * `GET`/`PATCH`/`DELETE /journal-entries/{id}` — `authenticate()` →
+         `validateObjectId('id')` (validates the `:id` path parameter) → (`xss()` →
+         `validateZodSchemas()` for `PATCH`) → controller.
+
+    The XSS sanitizer removes HTML tags from string values of the body, the query
+    string and the route parameters before the request reaches the controller.
+
+    ## Validation
+
+    Bodies are validated with **Zod v4**. Validation failures produce a `400 Bad Request`
+    whose `message` is the list of individual Zod issue messages joined with `". "`.
+    For example, sending an invalid email *and* a short password yields:
+
+    ```json
+    {
+      "status": "error",
+      "data": {
+        "message": "Email must be a string. Password must be at least 6 characters long"
+      }
+    }
+    ```
+
+    ## Ownership
+
+    Journal entries are strictly scoped to their owner. Every read, update and delete is
+    filtered by `createdBy === authenticated userId`, so a user can never see or modify
+    another user's entries — the entry simply appears as `404 Not Found`.
+
+    ## Rate limiting
+
+    `300` requests per IP address per 15-minute rolling window. Every response carries
+    the `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset` headers
+    (`X-RateLimit-Reset` is a UNIX timestamp in seconds). Exceeding the window returns
+    `429 Too Many Requests`, together with a `Retry-After` header holding the number
+    of seconds to wait for the window to reset.
+
+    ## Other response headers
+
+    `helmet` adds the following headers to every response:
+    `Content-Security-Policy`, `Cross-Origin-Opener-Policy: same-origin`,
+    `Cross-Origin-Resource-Policy: same-origin`, `Origin-Agent-Cluster: ?1`,
+    `Referrer-Policy: no-referrer`, `Strict-Transport-Security: max-age=31536000; includeSubDomains`,
+    `X-Content-Type-Options: nosniff`, `X-DNS-Prefetch-Control: off`,
+    `X-Download-Options: noopen`, `X-Frame-Options: SAMEORIGIN`,
+    `X-Permitted-Cross-Domain-Policies: none` and `X-XSS-Protection: 0`.
+
+    ## CORS
+
+    Only the following origins are accepted by the browser:
+
+    * `http://localhost:5173`
+    * `http://10.0.0.102:5173`
+    * `http://10.0.0.102:4173`
+    * `https://game-journal-seven.vercel.app`
+    * `https://game-journal-ednan.vercel.app`
+    * `https://game-journal.frizzera.dev`
+
+    Allowed methods: `GET`, `POST`, `PATCH`, `DELETE`.
+
+    ## Notes
+
+    * The production server is hosted on Render's free tier, so the **first** request
+      after a period of inactivity may take a while while the instance wakes up.
+    * The auth token is stored in `localStorage` by the front-end (instead of cookies)
+      to avoid CORS complications, particularly on WebKit/iOS.
+  contact:
+    name: Ednan Rogério Frizzera Filho
+    url: https://github.com/ednanf
+  license:
+    name: Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International
+    url: https://creativecommons.org/licenses/by-nc-nd/4.0/
+
+externalDocs:
+  description: Backend development report — architecture, data flow and security notes
+  url: https://github.com/ednanf/game-journal/blob/master/docs/BACKEND_REPORT.md
+
+servers:
+  - url: https://game-journal-vaax.onrender.com/api/v1
+    description: >-
+      Production server (Render). Free tier — the instance sleeps when idle, so the first
+      request after a period of inactivity can take a while to be served.
+  - url: http://localhost:9000/api/v1
+    description: Local development server (PORT=9000 as configured in backend/.env)
+  - url: http://localhost:3000/api/v1
+    description: Local fallback (server.ts default when PORT is not defined)
+
+tags:
+  - name: Users
+    description: Account creation, authentication, logout and account deletion.
+  - name: Journal Entries
+    description: >-
+      CRUD operations over the authenticated user's game journal, plus aggregated
+      lifetime and per-year statistics.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /users/register:
+    post:
+      tags:
+        - Users
+      summary: Register a new user
+      description: |
+        Creates a new user account and returns a JWT that can be used immediately for
+        authenticated requests.
+
+        Processing steps:
+
+        1. The body is sanitized against XSS payloads.
+        2. The body is validated with Zod — `email` must be a valid e-mail address and
+           `password` must be at least 6 characters long. Unknown properties are stripped.
+        3. The password is hashed with bcrypt (10 salt rounds) by a Mongoose pre-save hook.
+        4. The document is created. The e-mail is lower-cased and trimmed, and a unique
+           index guarantees it can only be used once.
+        5. A JWT (HS256) containing the `userId` claim is issued.
+
+        The password (and its hash) is never included in any response.
+      operationId: registerUser
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterUserRequest"
+            examples:
+              valid_registration:
+                summary: Valid registration
+                value:
+                  email: player@example.com
+                  password: securepassword123
+              minimal_registration:
+                summary: Shortest accepted password (6 characters)
+                value:
+                  email: player@example.com
+                  password: 6chars
+      responses:
+        "201":
+          description: The user was created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterUserResponse"
+              examples:
+                success:
+                  summary: Successful registration
+                  value:
+                    status: success
+                    data:
+                      message: User registered successfully.
+                      user: player@example.com
+                      token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiI1MDdmMWY3N2JjZjg2Y2Q3OTk0MzkwMTEiLCJpYXQiOjE3MDUzMTQ2MDAsImV4cCI6MTcwNTkxOTQwMH0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /users/login:
+    post:
+      tags:
+        - Users
+      summary: Log in an existing user
+      description: |
+        Authenticates a user with e-mail and password and returns a fresh JWT.
+
+        The request body is validated with the **same** schema used for registration, so
+        a malformed e-mail address or a password shorter than 6 characters is rejected
+        with `400 Bad Request` *before* the credentials are checked.
+
+        When the e-mail does not exist or the password does not match, the response is
+        `401 Unauthorized` with the generic message `Invalid email or password.` — the
+        same message is used for both cases, so the endpoint cannot be used to enumerate
+        registered accounts.
+      operationId: loginUser
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginUserRequest"
+            examples:
+              valid_login:
+                summary: Valid credentials
+                value:
+                  email: player@example.com
+                  password: securepassword123
+      responses:
+        "200":
+          description: The user was authenticated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginUserResponse"
+              examples:
+                success:
+                  summary: Successful login
+                  value:
+                    status: success
+                    data:
+                      message: User logged in successfully.
+                      user: player@example.com
+                      token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiI1MDdmMWY3N2JjZjg2Y2Q3OTk0MzkwMTEiLCJpYXQiOjE3MDUzMTQ2MDAsImV4cCI6MTcwNTkxOTQwMH0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /users/logout:
+    post:
+      tags:
+        - Users
+      summary: Log out the current user
+      description: |
+        Returns a success acknowledgement for the logout operation.
+
+        The API is stateless: no server-side session is created or destroyed, and the
+        token is **not** revoked server-side. Logging out is therefore a client-side
+        operation — the front-end simply discards the JWT stored in `localStorage`.
+        The endpoint is public and does not require an `Authorization` header.
+      operationId: logoutUser
+      security: []
+      responses:
+        "200":
+          description: The logout was acknowledged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LogoutUserResponse"
+              examples:
+                success:
+                  summary: Successful logout
+                  value:
+                    status: success
+                    data:
+                      message: User logged out successfully.
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /users/delete:
+    delete:
+      tags:
+        - Users
+      summary: Delete the authenticated user account
+      description: |
+        Permanently deletes the authenticated user's account **and every journal entry
+        owned by that user** (cascade delete). This operation cannot be undone.
+
+        The user is resolved from the `userId` claim of the JWT, not from the request
+        body or the URL, so it is always possible to delete only your own account.
+
+        The JWT remains cryptographically valid until it expires, but the underlying
+        user document no longer exists. Calling this endpoint a second time with the
+        same token therefore returns `404 Not Found`
+        (`User with ID {userId} not found.`), while the journal-entry endpoints simply
+        return empty results, because the entries of the deleted user were removed by
+        the cascade.
+      operationId: deleteUser
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The account and its journal entries were deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteUserResponse"
+              examples:
+                success:
+                  summary: Successful deletion
+                  value:
+                    status: success
+                    data:
+                      message: User deleted successfully.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /journal-entries:
+    get:
+      tags:
+        - Journal Entries
+      summary: List the authenticated user's journal entries
+      description: |
+        Returns a page of journal entries owned by the authenticated user, sorted by
+        `createdAt` descending (and `_id` descending as a tie-breaker).
+
+        Pagination is **cursor based**, which stays efficient for large datasets: pass
+        the `nextCursor` returned by the previous response as the `cursor` query
+        parameter to fetch the following page. `nextCursor` is `null` when the last
+        page has been reached.
+
+        The cursor format is `{unixTimestampMillis}_{entryId}`, for example
+        `1705314600000_507f1f77bcf86cd799439011`. Entries created during the walk are
+        picked up naturally because the sort key is the creation date.
+
+        Only entries owned by the authenticated user are returned; other users' entries
+        are never included.
+      operationId: getJournalEntries
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of journal entries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetJournalEntriesResponse"
+              examples:
+                with_entries:
+                  summary: A page containing entries
+                  value:
+                    status: success
+                    data:
+                      message: Journal entries retrieved successfully.
+                      entries:
+                        - id: 507f1f77bcf86cd799439011
+                          createdBy: 507f1f77bcf86cd799439012
+                          title: "The Legend of Zelda: Breath of the Wild"
+                          platform: Nintendo Switch
+                          status: completed
+                          rating: 9
+                          createdAt: "2024-01-15T10:30:00.000Z"
+                          updatedAt: "2024-01-20T14:22:00.000Z"
+                        - id: 507f1f77bcf86cd799439013
+                          createdBy: 507f1f77bcf86cd799439012
+                          title: Elden Ring
+                          platform: PC
+                          status: started
+                          rating: 5
+                          createdAt: "2024-02-02T18:05:11.000Z"
+                          updatedAt: "2024-02-02T18:05:11.000Z"
+                      nextCursor: 1706897111000_507f1f77bcf86cd799439013
+                empty_result:
+                  summary: The user has no journal entries yet
+                  value:
+                    status: success
+                    data:
+                      message: No journal entries found.
+                      entries: []
+                      nextCursor: null
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    post:
+      tags:
+        - Journal Entries
+      summary: Create a journal entry
+      description: |
+        Creates a new journal entry for the authenticated user.
+
+        * `title` and `platform` are required; `title` is trimmed and limited to 100
+          characters, `platform` is trimmed and must not be empty.
+        * `status` is optional and defaults to `started` when omitted.
+        * `rating` is optional, must be a number between 0 and 10, and defaults to `5`.
+        * Unknown properties are **silently stripped** by the Zod schema, so extra
+          fields never reach the database. The `createdBy` field is always set from the
+          JWT and can never be spoofed through the body.
+        * The body is sanitized against XSS payloads before validation. HTML tags are
+          stripped from string values, so a title containing a script element is stored
+          without it (for example `Zelda`).
+
+        The stored document is returned in the `entry` object of the response.
+      operationId: createJournalEntry
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateJournalEntryRequest"
+            examples:
+              complete_entry:
+                summary: All fields provided
+                value:
+                  title: Red Dead Redemption 2
+                  platform: PlayStation 5
+                  status: completed
+                  rating: 10
+              minimal_entry:
+                summary: Only the required fields (status defaults to "started", rating to 5)
+                value:
+                  title: Elden Ring
+                  platform: PC
+      responses:
+        "201":
+          description: The journal entry was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateJournalEntryResponse"
+              examples:
+                success:
+                  summary: Successful creation
+                  value:
+                    status: success
+                    data:
+                      message: Journal entry created successfully.
+                      entry:
+                        id: 507f1f77bcf86cd799439011
+                        createdBy: 507f1f77bcf86cd799439012
+                        title: Red Dead Redemption 2
+                        platform: PlayStation 5
+                        status: completed
+                        rating: 10
+                        createdAt: "2024-03-01T09:00:00.000Z"
+                        updatedAt: "2024-03-01T09:00:00.000Z"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /journal-entries/statistics:
+    get:
+      tags:
+        - Journal Entries
+      summary: Get journal statistics
+      description: |
+        Returns aggregated statistics computed over all journal entries owned by the
+        authenticated user.
+
+        * `lifetime` — the total number of entries per status, for the entire journal.
+        * `byYear` — the number of entries per status, grouped by the **UTC year** of
+          each entry's `createdAt` timestamp.
+
+        Only statuses that actually exist in the collection appear in the maps, so an
+        empty journal returns `{"lifetime": {}, "byYear": {}}` and a status with no
+        entries is simply absent from the map.
+
+        Unlike the other endpoints, the `data` object of this response has **no**
+        `message` field.
+      operationId: getJournalEntriesStatistics
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The statistics were computed successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetJournalEntriesStatisticsResponse"
+              examples:
+                with_data:
+                  summary: Journal with entries in two different years
+                  value:
+                    status: success
+                    data:
+                      lifetime:
+                        completed: 15
+                        started: 3
+                        revisited: 5
+                        paused: 2
+                        dropped: 1
+                      byYear:
+                        "2024":
+                          completed: 8
+                          started: 2
+                          paused: 1
+                        "2023":
+                          completed: 7
+                          started: 1
+                          paused: 1
+                          dropped: 1
+                          revisited: 5
+                empty_journal:
+                  summary: User without any journal entry
+                  value:
+                    status: success
+                    data:
+                      lifetime: {}
+                      byYear: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /journal-entries/{id}:
+    parameters:
+      - $ref: "#/components/parameters/EntryId"
+    get:
+      tags:
+        - Journal Entries
+      summary: Get a journal entry by ID
+      description: |
+        Returns a single journal entry.
+
+        The `id` path parameter must be a valid MongoDB ObjectId (24 hexadecimal
+        characters), otherwise the request is rejected with `400 Bad Request`
+        (`Invalid id format`).
+
+        Entries that do not exist **and** entries owned by another user are both
+        reported as `404 Not Found` with the message `Journal entry not found.`, so the
+        endpoint cannot be used to probe for other users' entries.
+      operationId: getJournalEntryById
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The journal entry was found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetJournalEntryResponse"
+              examples:
+                success:
+                  summary: Successful retrieval
+                  value:
+                    status: success
+                    data:
+                      message: Journal entry retrieved successfully.
+                      entry:
+                        id: 507f1f77bcf86cd799439011
+                        createdBy: 507f1f77bcf86cd799439012
+                        title: "The Legend of Zelda: Breath of the Wild"
+                        platform: Nintendo Switch
+                        status: completed
+                        rating: 9
+                        createdAt: "2024-01-15T10:30:00.000Z"
+                        updatedAt: "2024-01-20T14:22:00.000Z"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    patch:
+      tags:
+        - Journal Entries
+      summary: Update a journal entry
+      description: |
+        Partially updates a journal entry. Only the properties present in the request
+        body are modified; the others keep their current value.
+
+        Every field is optional, but the body must contain **at least one** updatable
+        field — an empty object is rejected with `400 Bad Request`
+        (`No update data provided.`).
+
+        The patch schema is **strict**: unknown properties are rejected with
+        `400 Bad Request` (`Unrecognized key: "..."`) instead of being ignored.
+
+        Keys starting with `$` are additionally stripped by the controller before the
+        update is applied, as a defence-in-depth measure against NoSQL operator
+        injection (in practice the strict schema already rejects such keys).
+        Mongoose validators run on the updated paths, and the `updatedAt` timestamp is
+        refreshed automatically.
+
+        The entry is looked up by `_id` **and** `createdBy`; an entry owned by another
+        user is reported as `404 Not Found`
+        (`No journal entry found with id: {id}.`).
+      operationId: updateJournalEntry
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateJournalEntryRequest"
+            examples:
+              single_field:
+                summary: Update only the rating
+                value:
+                  rating: 4
+              multiple_fields:
+                summary: Update the status and the title
+                value:
+                  title: "Elden Ring: Shadow of the Erdtree"
+                  status: paused
+              status_and_rating:
+                summary: Update the status and the rating
+                value:
+                  status: revisited
+                  rating: 8
+      responses:
+        "200":
+          description: The journal entry was updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateJournalEntryResponse"
+              examples:
+                success:
+                  summary: Successful update
+                  value:
+                    status: success
+                    data:
+                      message: Journal entry updated successfully.
+                      entry:
+                        id: 507f1f77bcf86cd799439011
+                        createdBy: 507f1f77bcf86cd799439012
+                        title: Elden Ring
+                        platform: PC
+                        status: revisited
+                        rating: 8
+                        createdAt: "2024-01-15T10:30:00.000Z"
+                        updatedAt: "2024-03-04T12:45:00.000Z"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    delete:
+      tags:
+        - Journal Entries
+      summary: Delete a journal entry
+      description: |
+        Permanently deletes a journal entry owned by the authenticated user. This
+        operation cannot be undone.
+
+        The entry is looked up by `_id` **and** `createdBy`; an entry that does not
+        exist or belongs to another user is reported as `404 Not Found`
+        (`No journal entry found with id: {id}.`).
+      operationId: deleteJournalEntry
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The journal entry was deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteJournalEntryResponse"
+              examples:
+                success:
+                  summary: Successful deletion
+                  value:
+                    status: success
+                    data:
+                      message: Journal entry deleted successfully.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT issued by `POST /users/register` or `POST /users/login`.
+
+        Send it as `Authorization: Bearer <token>`. The token is signed with `HS256`
+        and carries a `userId` claim holding the hexadecimal `_id` of the user. Tokens
+        expire after the lifetime configured in the `JWT_LIFETIME` environment variable
+        (for example `7d`).
+
+  parameters:
+    EntryId:
+      name: id
+      in: path
+      required: true
+      description: |
+        The hexadecimal MongoDB ObjectId of the journal entry (24 characters). A value
+        that is not a valid ObjectId is rejected with `400 Bad Request`
+        (`Invalid id format`).
+      schema:
+        type: string
+        pattern: "^[0-9a-fA-F]{24}$"
+        minLength: 24
+        maxLength: 24
+      example: 507f1f77bcf86cd799439011
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: |
+        Maximum number of entries to return.
+
+        The value is parsed with `parseInt`, therefore a missing, empty or non-numeric
+        value falls back to the default of `10`. `limit=0` also falls back to `10`,
+        while a negative value (for example `-1`) is rejected with `400 Bad Request`
+        (`Limit must be a positive number.`).
+
+        There is no server-side maximum, but values above `100` are discouraged for
+        performance reasons.
+      schema:
+        type: integer
+        default: 10
+      example: 20
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: |
+        Opaque pagination cursor pointing to the last entry of the previous page. Use
+        the `nextCursor` value returned by the previous response.
+
+        The format is `{unixTimestampMillis}_{entryId}`, e.g.
+        `1705314600000_507f1f77bcf86cd799439011`. A malformed cursor is not validated
+        and makes the database query fail with `500 Internal Server Error`.
+      schema:
+        type: string
+        pattern: "^[0-9]+_[0-9a-fA-F]{24}$"
+      example: 1705314600000_507f1f77bcf86cd799439011
+
+  headers:
+    XRateLimitLimit:
+      description: Maximum number of requests allowed in the current window (300).
+      schema:
+        type: integer
+        example: 300
+    XRateLimitRemaining:
+      description: Number of requests still available in the current window.
+      schema:
+        type: integer
+        example: 299
+    XRateLimitReset:
+      description: UNIX timestamp (in seconds) at which the current window resets.
+      schema:
+        type: integer
+        example: 1705315500
+    RetryAfter:
+      description: |
+        Number of seconds to wait before the rate limit window resets. Only sent on
+        `429 Too Many Requests` responses.
+      schema:
+        type: integer
+        example: 840
+
+  schemas:
+    ApiResponse:
+      type: object
+      description: Standard envelope used by every response produced by the application.
+      required:
+        - status
+        - data
+      properties:
+        status:
+          type: string
+          enum:
+            - success
+            - error
+          description: "`success` for 2xx responses, `error` otherwise."
+          example: success
+        data:
+          type: object
+          description: Response payload. The shape depends on the endpoint.
+
+    ErrorResponse:
+      type: object
+      description: Error envelope returned for every 4xx/5xx response handled by the application.
+      required:
+        - status
+        - data
+      properties:
+        status:
+          type: string
+          enum:
+            - error
+          example: error
+        data:
+          type: object
+          required:
+            - message
+          properties:
+            message:
+              type: string
+              description: Human readable description of the error.
+              example: Journal entry not found.
+
+    TooManyRequestsResponse:
+      type: object
+      description: |
+        Rate limit payload. This is the only error response that is **not** wrapped in
+        the standard `{ status, data }` envelope, because it is generated by the rate
+        limiter before the application error handler runs.
+      required:
+        - status
+        - error
+      properties:
+        status:
+          type: integer
+          enum:
+            - 429
+          example: 429
+        error:
+          type: string
+          example: Too many requests, please try again later.
+
+    RegisterUserRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+          description: |
+            The e-mail address used to identify the account. It is lower-cased and
+            trimmed by the database schema and must be unique across the application.
+          example: player@example.com
+        password:
+          type: string
+          minLength: 6
+          description: |
+            The plain-text password. It must be at least 6 characters long and is hashed
+            with bcrypt (10 salt rounds) before being stored.
+          example: securepassword123
+
+    LoginUserRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+          description: The e-mail address of the account.
+          example: player@example.com
+        password:
+          type: string
+          minLength: 6
+          description: The account password (at least 6 characters).
+          example: securepassword123
+
+    RegisterUserResponse:
+      allOf:
+        - $ref: "#/components/schemas/ApiResponse"
+        - type: object
+          properties:
+            status:
+              type: string
+              enum:
+                - success
+            data:
+              type: object
+              required:
+                - message
+                - user
+                - token
+              properties:
+                message:
+                  type: string
+                  example: User registered successfully.
+                user:
+                  type: string
+                  format: email
+                  description: The e-mail address of the newly created account.
+                  example: player@example.com
+                token:
+                  type: string
+                  description: |
+                    The issued JWT. Send it as `Authorization: Bearer <token>` on every
+                    authenticated request.
+                  example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiI1MDdmMWY3N2JjZjg2Y2Q3OTk0MzkwMTEiLCJpYXQiOjE3MDUzMTQ2MDAsImV4cCI6MTcwNTkxOTQwMH0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c
+
+    LoginUserResponse:
+      allOf:
+        - $ref: "#/components/schemas/ApiResponse"
+        - type: object
+          properties:
+            status:
+              type: string
+              enum:
+                - success
+            data:
+              type: object
+              required:
+                - message
+                - user
+                - token
+              properties:
+                message:
+                  type: string
+                  example: User logged in successfully.
+                user:
+                  type: string
+                  format: email
+                  description: The e-mail address of the authenticated account.
+                  example: player@example.com
+                token:
+                  type: string
+                  description: The issued JWT, to be used as a bearer token.
+                  example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiI1MDdmMWY3N2JjZjg2Y2Q3OTk0MzkwMTEiLCJpYXQiOjE3MDUzMTQ2MDAsImV4cCI6MTcwNTkxOTQwMH0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c
+
+    LogoutUserResponse:
+      allOf:
+        - $ref: "#/components/schemas/ApiResponse"
+        - type: object
+          properties:
+            status:
+              type: string
+              enum:
+                - success
+            data:
+              type: object
+              required:
+                - message
+              properties:
+                message:
+                  type: string
+                  example: User logged out successfully.
+
+    DeleteUserResponse:
+      allOf:
+        - $ref: "#/components/schemas/ApiResponse"
+        - type: object
+          properties:
+            status:
+              type: string
+              enum:
+                - success
+            data:
+              type: object
+              required:
+                - message
+              properties:
+                message:
+                  type: string
+                  example: User deleted successfully.
+
+    JournalEntryStatus:
+      type: string
+      description: |
+        The status of a game in the journal.
+
+        * `started` — currently being played (default).
+        * `completed` — finished.
+        * `revisited` — played again after a previous playthrough.
+        * `paused` — put on hold.
+        * `dropped` — abandoned.
+      enum:
+        - started
+        - completed
+        - revisited
+        - paused
+        - dropped
+      example: completed
+
+    JournalEntry:
+      type: object
+      description: |
+        Data Transfer Object (DTO) of a journal entry. It is the API representation of
+        the database document — the internal `_id` is exposed as `id` and the owner is
+        exposed as `createdBy`.
+      required:
+        - id
+        - createdBy
+        - title
+        - platform
+        - status
+        - rating
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          pattern: "^[0-9a-fA-F]{24}$"
+          description: The hexadecimal MongoDB ObjectId of the entry.
+          example: 507f1f77bcf86cd799439011
+        createdBy:
+          type: string
+          pattern: "^[0-9a-fA-F]{24}$"
+          description: The hexadecimal MongoDB ObjectId of the owner of the entry.
+          example: 507f1f77bcf86cd799439012
+        title:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: The title of the game.
+          example: "The Legend of Zelda: Breath of the Wild"
+        platform:
+          type: string
+          minLength: 1
+          description: The platform the game was played on.
+          example: Nintendo Switch
+        status:
+          $ref: "#/components/schemas/JournalEntryStatus"
+        rating:
+          type: number
+          minimum: 0
+          maximum: 10
+          description: The personal rating of the game. Defaults to `5` when not provided.
+          example: 9
+        createdAt:
+          type: string
+          format: date-time
+          description: The creation timestamp (ISO 8601, UTC).
+          example: "2024-01-15T10:30:00.000Z"
+        updatedAt:
+          type: string
+          format: date-time
+          description: The last update timestamp (ISO 8601, UTC).
+          example: "2024-01-20T14:22:00.000Z"
+
+    CreateJournalEntryRequest:
+      type: object
+      description: |
+        Body of the create-entry request. Unknown properties are stripped by the
+        validation schema, and `createdBy` is always derived from the JWT.
+      required:
+        - title
+        - platform
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: |
+            The title of the game. The value is trimmed and must contain at least one
+            character after trimming.
+          example: "The Legend of Zelda: Breath of the Wild"
+        platform:
+          type: string
+          minLength: 1
+          description: |
+            The platform the game was played on. The value is trimmed and must contain
+            at least one character after trimming.
+          example: Nintendo Switch
+        status:
+          allOf:
+            - $ref: "#/components/schemas/JournalEntryStatus"
+          description: The status of the game. Defaults to `started` when omitted.
+        rating:
+          type: number
+          minimum: 0
+          maximum: 10
+          description: The personal rating of the game. Defaults to `5` when omitted.
+          example: 9
+
+    UpdateJournalEntryRequest:
+      type: object
+      description: |
+        Body of the partial-update request. All properties are optional, but the body
+        must contain at least one of them, and **no unknown property is allowed**
+        (the schema is strict).
+      minProperties: 1
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: The new title of the game.
+          example: "The Legend of Zelda: Tears of the Kingdom"
+        platform:
+          type: string
+          minLength: 1
+          description: The new platform of the game.
+          example: Nintendo Switch 2
+        status:
+          allOf:
+            - $ref: "#/components/schemas/JournalEntryStatus"
+          description: The new status of the game.
+        rating:
+          type: number
+          minimum: 0
+          maximum: 10
+          description: The new rating of the game.
+          example: 8
+
+    GetJournalEntriesResponse:
+      allOf:
+        - $ref: "#/components/schemas/ApiResponse"
+        - type: object
+          properties:
+            status:
+              type: string
+              enum:
+                - success
+            data:
+              type: object
+              required:
+                - message
+                - entries
+                - nextCursor
+              properties:
+                message:
+                  type: string
+                  description: "`No journal entries found.` when the page is empty, otherwise `Journal entries retrieved successfully.`"
+                  example: Journal entries retrieved successfully.
+                entries:
+                  type: array
+                  description: The page of journal entries owned by the authenticated user.
+                  items:
+                    $ref: "#/components/schemas/JournalEntry"
+                nextCursor:
+                  type: string
+                  nullable: true
+                  description: |
+                    Cursor of the next page, or `null` when the last page was reached.
+                    Pass it back through the `cursor` query parameter to continue.
+                  example: 1705314600000_507f1f77bcf86cd799439011
+
+    GetJournalEntryResponse:
+      allOf:
+        - $ref: "#/components/schemas/ApiResponse"
+        - type: object
+          properties:
+            status:
+              type: string
+              enum:
+                - success
+            data:
+              type: object
+              required:
+                - message
+                - entry
+              properties:
+                message:
+                  type: string
+                  example: Journal entry retrieved successfully.
+                entry:
+                  $ref: "#/components/schemas/JournalEntry"
+
+    CreateJournalEntryResponse:
+      allOf:
+        - $ref: "#/components/schemas/ApiResponse"
+        - type: object
+          properties:
+            status:
+              type: string
+              enum:
+                - success
+            data:
+              type: object
+              required:
+                - message
+                - entry
+              properties:
+                message:
+                  type: string
+                  example: Journal entry created successfully.
+                entry:
+                  $ref: "#/components/schemas/JournalEntry"
+
+    UpdateJournalEntryResponse:
+      allOf:
+        - $ref: "#/components/schemas/ApiResponse"
+        - type: object
+          properties:
+            status:
+              type: string
+              enum:
+                - success
+            data:
+              type: object
+              required:
+                - message
+                - entry
+              properties:
+                message:
+                  type: string
+                  example: Journal entry updated successfully.
+                entry:
+                  $ref: "#/components/schemas/JournalEntry"
+
+    DeleteJournalEntryResponse:
+      allOf:
+        - $ref: "#/components/schemas/ApiResponse"
+        - type: object
+          properties:
+            status:
+              type: string
+              enum:
+                - success
+            data:
+              type: object
+              required:
+                - message
+              properties:
+                message:
+                  type: string
+                  example: Journal entry deleted successfully.
+
+    StatusCountMap:
+      type: object
+      description: |
+        Map of `status` → number of journal entries. Only the statuses that exist in
+        the collection are present as keys.
+      additionalProperties:
+        type: integer
+        minimum: 0
+      example:
+        completed: 15
+        started: 3
+        revisited: 5
+        paused: 2
+        dropped: 1
+
+    GetJournalEntriesStatisticsResponse:
+      allOf:
+        - $ref: "#/components/schemas/ApiResponse"
+        - type: object
+          properties:
+            status:
+              type: string
+              enum:
+                - success
+            data:
+              type: object
+              required:
+                - lifetime
+                - byYear
+              properties:
+                lifetime:
+                  allOf:
+                    - $ref: "#/components/schemas/StatusCountMap"
+                  description: Total number of journal entries per status, for the entire journal.
+                byYear:
+                  type: object
+                  description: |
+                    Number of journal entries per status, grouped by the UTC year of the
+                    `createdAt` timestamp. The keys are four-digit years.
+                  additionalProperties:
+                    $ref: "#/components/schemas/StatusCountMap"
+                  example:
+                    "2024":
+                      completed: 8
+                      started: 2
+                      paused: 1
+                    "2023":
+                      completed: 7
+                      started: 1
+                      paused: 1
+                      dropped: 1
+                      revisited: 5
+
+  responses:
+    BadRequest:
+      description: |
+        The request is invalid — the body failed validation, a path parameter is not a
+        valid ObjectId, the `limit` query parameter is negative, or the patch body is
+        empty.
+      headers:
+        X-RateLimit-Limit:
+          $ref: "#/components/headers/XRateLimitLimit"
+        X-RateLimit-Remaining:
+          $ref: "#/components/headers/XRateLimitRemaining"
+        X-RateLimit-Reset:
+          $ref: "#/components/headers/XRateLimitReset"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            invalid_email:
+              summary: Invalid e-mail address
+              value:
+                status: error
+                data:
+                  message: Email must be a string
+            short_password:
+              summary: Password shorter than 6 characters
+              value:
+                status: error
+                data:
+                  message: Password must be at least 6 characters long
+            multiple_validation_errors:
+              summary: Several validation errors joined with ". "
+              value:
+                status: error
+                data:
+                  message: Email must be a string. Password must be at least 6 characters long
+            invalid_entry_id:
+              summary: The :id path parameter is not a valid ObjectId
+              value:
+                status: error
+                data:
+                  message: Invalid id format
+            negative_limit:
+              summary: The limit query parameter is negative
+              value:
+                status: error
+                data:
+                  message: Limit must be a positive number.
+            empty_patch_body:
+              summary: The patch body contains no updatable field
+              value:
+                status: error
+                data:
+                  message: No update data provided.
+            unknown_patch_field:
+              summary: The patch body contains a property that is not part of the schema
+              value:
+                status: error
+                data:
+                  message: 'Unrecognized key: "favorite"'
+            missing_title:
+              summary: The title is missing or is not a string
+              value:
+                status: error
+                data:
+                  message: Title must be a string
+            empty_title:
+              summary: The title is empty (or only whitespace)
+              value:
+                status: error
+                data:
+                  message: Title is required and cannot be empty
+            title_too_long:
+              summary: The title exceeds 100 characters
+              value:
+                status: error
+                data:
+                  message: Title cannot exceed 100 characters
+            missing_platform:
+              summary: The platform is missing or is not a string
+              value:
+                status: error
+                data:
+                  message: Platform must be a string
+            empty_platform:
+              summary: The platform is empty (or only whitespace)
+              value:
+                status: error
+                data:
+                  message: Platform is required and cannot be empty
+            invalid_status:
+              summary: The status is not one of the allowed values
+              value:
+                status: error
+                data:
+                  message: 'Invalid option: expected one of "started"|"completed"|"revisited"|"paused"|"dropped"'
+            invalid_rating_type:
+              summary: The rating is not a number
+              value:
+                status: error
+                data:
+                  message: "Invalid input: expected number, received string"
+            rating_too_high:
+              summary: The rating is greater than 10
+              value:
+                status: error
+                data:
+                  message: "Too big: expected number to be <=10"
+            rating_too_low:
+              summary: The rating is lower than 0
+              value:
+                status: error
+                data:
+                  message: "Too small: expected number to be >=0"
+
+    Unauthorized:
+      description: |
+        Authentication failed — the `Authorization` header is missing or malformed, the
+        token is invalid/expired/tampered with, or the token payload has no `userId`
+        claim.
+      headers:
+        X-RateLimit-Limit:
+          $ref: "#/components/headers/XRateLimitLimit"
+        X-RateLimit-Remaining:
+          $ref: "#/components/headers/XRateLimitRemaining"
+        X-RateLimit-Reset:
+          $ref: "#/components/headers/XRateLimitReset"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            missing_header:
+              summary: The Authorization header is missing or does not use the Bearer scheme
+              value:
+                status: error
+                data:
+                  message: "Authorization header missing or malformed. Expected format: Bearer 'token'."
+            invalid_token:
+              summary: The token is invalid, expired or tampered with
+              value:
+                status: error
+                data:
+                  message: "JWT verification failed: token is invalid, expired, or tampered with."
+            invalid_payload:
+              summary: The token payload does not contain a userId claim
+              value:
+                status: error
+                data:
+                  message: JWT payload missing required userId. Token structure invalid.
+            invalid_credentials:
+              summary: Login with an unknown e-mail or a wrong password
+              value:
+                status: error
+                data:
+                  message: Invalid email or password.
+            not_authenticated:
+              summary: The authenticated user could not be resolved
+              value:
+                status: error
+                data:
+                  message: User not authenticated.
+
+    NotFound:
+      description: |
+        The requested resource does not exist or is not owned by the caller.
+
+        The same response is also produced by the catch-all route handler for any
+        path that does not match a route of the API, in which case the message is
+        `Not Found - {originalUrl}`.
+      headers:
+        X-RateLimit-Limit:
+          $ref: "#/components/headers/XRateLimitLimit"
+        X-RateLimit-Remaining:
+          $ref: "#/components/headers/XRateLimitRemaining"
+        X-RateLimit-Reset:
+          $ref: "#/components/headers/XRateLimitReset"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            entry_not_found:
+              summary: Journal entry not found (GET)
+              value:
+                status: error
+                data:
+                  message: Journal entry not found.
+            entry_not_found_on_mutation:
+              summary: Journal entry not found (PATCH / DELETE)
+              value:
+                status: error
+                data:
+                  message: "No journal entry found with id: 507f1f77bcf86cd799439011."
+            user_not_found:
+              summary: The authenticated user no longer exists
+              value:
+                status: error
+                data:
+                  message: "User with ID 507f1f77bcf86cd799439012 not found."
+            unknown_route:
+              summary: The requested path does not match any route of the API
+              value:
+                status: error
+                data:
+                  message: Not Found - /api/v1/unknown-route
+
+    Conflict:
+      description: The resource already exists — the e-mail address is already registered.
+      headers:
+        X-RateLimit-Limit:
+          $ref: "#/components/headers/XRateLimitLimit"
+        X-RateLimit-Remaining:
+          $ref: "#/components/headers/XRateLimitRemaining"
+        X-RateLimit-Reset:
+          $ref: "#/components/headers/XRateLimitReset"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            email_already_in_use:
+              summary: The e-mail address is already registered
+              value:
+                status: error
+                data:
+                  message: Email already in use.
+
+    TooManyRequests:
+      description: |
+        The rate limit of 300 requests per IP address per 15-minute window was
+        exceeded. Wait for the window to reset and retry.
+      headers:
+        X-RateLimit-Limit:
+          $ref: "#/components/headers/XRateLimitLimit"
+        X-RateLimit-Remaining:
+          $ref: "#/components/headers/XRateLimitRemaining"
+        X-RateLimit-Reset:
+          $ref: "#/components/headers/XRateLimitReset"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TooManyRequestsResponse"
+          examples:
+            rate_limit_exceeded:
+              summary: Too many requests
+              value:
+                status: 429
+                error: Too many requests, please try again later.
+
+    InternalServerError:
+      description: |
+        An unexpected error occurred. The message depends on the failure — for example a
+        misconfigured `JWT_SECRET` returns
+        `Server misconfiguration: JWT_SECRET environment variable is not set.`
+      headers:
+        X-RateLimit-Limit:
+          $ref: "#/components/headers/XRateLimitLimit"
+        X-RateLimit-Remaining:
+          $ref: "#/components/headers/XRateLimitRemaining"
+        X-RateLimit-Reset:
+          $ref: "#/components/headers/XRateLimitReset"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          examples:
+            generic_error:
+              summary: Unexpected failure
+              value:
+                status: error
+                data:
+                  message: An unexpected error occurred. Please try again later.
+            jwt_configuration_error:
+              summary: The JWT_SECRET environment variable is not set
+              value:
+                status: error
+                data:
+                  message: "Server misconfiguration: JWT_SECRET environment variable is not set."

@@ -6,9 +6,27 @@
     "linkLabel": "Explore API"
   },
   {
-    "title": "Petstore (Example)",
-    "description": "Example API reference, kept temporarily for testing.",
-    "href": "/api/petstore",
+    "title": "Game Journal V2",
+    "description": "API reference for the Game Journal V2 project.",
+    "href": "/api/game-journal-v2",
+    "linkLabel": "Explore API"
+  },
+  {
+    "title": "Mini Community",
+    "description": "API reference for the Mini Community project.",
+    "href": "/api/mini-community",
+    "linkLabel": "Explore API"
+  },
+  {
+    "title": "Game Journal",
+    "description": "API reference for the Game Journal project.",
+    "href": "/api/game-journal",
+    "linkLabel": "Explore API"
+  },
+  {
+    "title": "MERN Task Manager",
+    "description": "API reference for the MERN Task Manager project.",
+    "href": "/api/mern-task-manager",
     "linkLabel": "Explore API"
   }
 ]

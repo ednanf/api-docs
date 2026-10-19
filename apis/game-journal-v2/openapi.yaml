@@ -1,0 +1,1458 @@
+openapi: 3.1.0
+
+info:
+  title: Game Journal V2 API
+  version: 1.0.0
+  summary: HTTP API of the Game Journal V2 backend (Express + MongoDB + JWT).
+  description: |
+    REST API for **Game Journal V2**, the backend of an offline-first journaling PWA for video games.
+    The frontend (React + Vite PWA) treats IndexedDB as its source of truth and uses this API to
+    synchronise in the background, so this contract is intentionally small, explicit and strictly typed.
+
+    ---
+
+    ## 1. Base path & versioning
+
+    Every route is mounted under `/api/v1` (`src/app.ts`):
+
+    | Mount point        | Router                | Access          |
+    | ------------------ | --------------------- | --------------- |
+    | `/api/v1/auth`     | `authRoutes`          | Public          |
+    | `/api/v1/user`     | `userRoutes`          | JWT required    |
+    | `/api/v1/entries`  | `journalEntriesRoutes`| JWT required    |
+
+    ---
+
+    ## 2. Response envelope
+
+    Every JSON response produced by a controller or by the central error handler uses the same envelope:
+
+    ```json
+    {
+      "status": "success",
+      "data": { "message": "..." }
+    }
+    ```
+
+    ```json
+    {
+      "status": "error",
+      "data": { "message": "..." }
+    }
+    ```
+
+    * `status` — literal string `"success"` or `"error"`.
+    * `data` — the payload on success, the error details on failure.
+    * Successful payloads are **not** uniform: some carry a `message` (all auth/user payloads and the
+      single-entry endpoints do), while `GET /api/v1/entries` returns `{ entries, nextCursor }` and
+      `GET /api/v1/entries/statistics` returns `{ message, lifetime, byYear }`.
+
+    Two responses do **not** follow the envelope and are documented explicitly:
+
+    * `429 Too Many Requests` — emitted by the rate limiter with the body
+      `{ "status": 429, "error": "Too many requests, please try again later." }` (`status` is a *number*
+      and the payload key is `error`, not `data`).
+    * Unmatched routes — see §7.
+
+    ---
+
+    ## 3. Authentication
+
+    * `POST /api/v1/auth/register` and `POST /api/v1/auth/login` return a signed JWT.
+    * The token is a **HS256** JWT whose payload is `{ "userId": "<24-hex ObjectId>", "iat": <n>, "exp": <n> }`.
+      Its lifetime comes from the `JWT_LIFETIME` environment variable (`30d` in the repository's `.env`).
+    * Protected routes read the token from the `Authorization` header using the `Bearer <token>` scheme.
+      The token is verified with the `JWT_SECRET` environment variable; the `userId` claim is the only
+      identity source used downstream.
+    * The API is **stateless**: tokens are not stored server-side, `POST /api/v1/auth/logout` does not
+      revoke anything, and changing the password does not invalidate already-issued tokens. The client is
+      responsible for discarding the token.
+    * Passwords are hashed with bcrypt (10 salt rounds) by a Mongoose `pre('save')` hook and are never
+      returned by any endpoint.
+
+    ---
+
+    ## 4. Input handling
+
+    For every `POST`/`PATCH` endpoint the request body goes through two middleware layers **in this order**:
+
+    1. **XSS sanitisation** (`express-xss-sanitizer` → `sanitize-html` defaults): the tag set is reduced to
+       a safe allow-list, all attributes are stripped, the contents of `script` and `style` elements are
+       dropped and bare `&`, `<`, `>` are entity-encoded. The sanitised value is what gets validated and
+       persisted (e.g. `notes: "Runs & roses"` is stored as `"Runs &amp; roses"`).
+    2. **Zod validation** (`src/zodSchemas`): the parsed (and therefore trimmed/coerced) result *replaces*
+       `req.body`. Unknown keys are rejected because every body schema is `.strict()`.
+
+    Validation failures are reported as `400` with the Zod issue messages joined by `". "`:
+
+    | Situation                              | `data.message`                                                            |
+    | -------------------------------------- | ------------------------------------------------------------------------- |
+    | Malformed e-mail                       | `Invalid email address`                                                   |
+    | Password shorter than 6 characters     | `Password must contain at least 6 characters`                              |
+    | Unknown key in the body                | `Unrecognized key: "foo"`                                                 |
+    | Missing field                          | `Invalid input: expected string, received undefined`                       |
+    | Invalid `status`                       | `Invalid option: expected one of "started"\|"completed"\|"revisited"\|"paused"\|"dropped"` |
+    | Non-ISO `entryDate`                    | `Date must be a valid ISO datetime string.`                                |
+    | `status: "completed"` without `rating` | `Rating is required when status is completed.`                            |
+    | `rating` on a non-completed entry      | `Rating is only allowed for completed entries.`                           |
+
+    ---
+
+    ## 5. Data ownership (BOLA protection)
+
+    Every journal-entry query is scoped by the authenticated `userId`, and every user query is scoped by
+    the `userId` taken from the token. Requesting an entry that belongs to somebody else returns `404`
+    (not `403`), so the API never confirms the existence of foreign resources.
+
+    ---
+
+    ## 6. Rate limiting
+
+    A global limiter allows **300 requests per 15 minutes per IP** (`src/configs/rateLimitOptions.ts`).
+    It is registered before the CORS middleware, so it applies to every endpoint, including the public
+    ones, and it also counts preflight requests.
+
+    * Successful responses carry `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`.
+    * Exceeding the quota returns `429` with `Retry-After: 900` and the non-envelope body
+      `{ "status": 429, "error": "Too many requests, please try again later." }`.
+
+    ---
+
+    ## 7. CORS, security headers and unmatched routes
+
+    **CORS** (`src/configs/corsOptions.ts`) — allowed origins:
+
+    * `http://localhost:5173`
+    * `http://localhost:4173`
+    * `http://10.0.0.102:4173`
+    * `http://10.0.0.102:5173`
+    * `https://journal.frizzera.dev`
+    * `https://game-journal-v2.vercel.app`
+
+    Allowed methods: `GET`, `POST`, `PATCH`, `DELETE`. Preflight (`OPTIONS`) requests are answered with
+    `200` and an empty body. Requests from an origin that is not on the list are still executed by the
+    server, but no `Access-Control-Allow-Origin` header is returned, so the browser blocks the response.
+
+    **Security headers** — `helmet()` adds `Content-Security-Policy`, `Cross-Origin-Opener-Policy`,
+    `Cross-Origin-Resource-Policy`, `Origin-Agent-Cluster`, `Referrer-Policy: no-referrer`,
+    `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-DNS-Prefetch-Control`,
+    `X-Download-Options`, `X-Frame-Options: SAMEORIGIN`, `X-Permitted-Cross-Domain-Policies` and
+    `X-XSS-Protection: 0` to every response.
+
+    **Unmatched routes** — `errorHandler` is registered *before* `notFound` in `src/app.ts`, so the
+    `NotFoundError` raised by the catch-all never reaches the JSON error handler. Unmatched paths (and
+    unsupported methods on a known path) therefore fall through to Express' default handler and are
+    answered with an **HTML** body and status `404` — not with the JSON envelope.
+
+    ---
+
+    ## 8. Pagination
+
+    `GET /api/v1/entries` uses keyset ("cursor") pagination sorted by `entryDate` descending and `_id`
+    descending. The server fetches `limit + 1` documents to detect whether another page exists. When a
+    further page exists, `data.nextCursor` contains the base64 encoding of
+    `{"entryDate":"<ISO>","_id":"<hex>"}`; otherwise it is `null`. The cursor is opaque — clients must
+    send it back verbatim. A malformed cursor is ignored and the first page is returned.
+  contact:
+    name: Ednan Rogério Frizzera Filho
+    url: https://github.com/ednanf
+  license:
+    name: All Rights Reserved
+    identifier: LicenseRef-All-Rights-Reserved
+
+externalDocs:
+  description: Backend request-lifecycle documentation
+  url: https://github.com/ednanf/game-journal-v2/blob/master/docs/backend-lifecycle-v4.md
+
+servers:
+  - url: http://localhost:9000
+    description: Local development — `backend/.env` sets `PORT=9000`.
+  - url: http://localhost:3000
+    description: Local development — default `PORT` used when the environment variable is unset.
+  - url: https://{host}
+    description: |
+      Production deployment (hosted on Render).
+
+      The production host is **not** stored in this repository; replace `{host}` with the deployed host.
+      The frontend receives the same value through the `VITE_API_BASE_URL_PROD` environment variable.
+    variables:
+      host:
+        default: your-deployment-host.onrender.com
+        description: Host name of the deployed API.
+
+tags:
+  - name: Authentication
+    description: Account creation, login and logout.
+  - name: User
+    description: Operations restricted to the authenticated user's own account.
+  - name: Journal Entries
+    description: Creation, retrieval, filtering, pagination, statistics and deletion of game journal entries.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /api/v1/auth/register:
+    post:
+      tags: [Authentication]
+      summary: Register a new account
+      operationId: registerUser
+      security: []
+      description: |
+        Creates a user, hashes the password with bcrypt (10 salt rounds) and returns a freshly signed JWT.
+
+        The address is lower-cased by the persistence layer before it is stored, and the response echoes
+        the stored (lower-cased) value. A unique index on `email` makes addresses case-insensitively
+        unique, so `Player@Example.com` and `player@example.com` are the same account.
+
+        **Duplicate address.** The error handler contains a dedicated branch that maps MongoDB's
+        duplicate-key error (`code: 11000`) to `409 Conflict` with the payload
+        `{ "status": "error", "data": { "code": 11000, "message": "Email already exists." } }`.
+        That branch inspects `err.cause.code`, but the MongoDB driver used by the current Mongoose
+        version exposes the code directly on the error, so **the branch is not reached and a duplicate
+        address is currently reported as `500 Internal Server Error`** with the raw driver message and an
+        `errorId`. The `409` payload above documents the intended contract.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserCredentialsRequest"
+            example:
+              email: player@example.com
+              password: secret123
+      responses:
+        "201":
+          description: The account was created and a token was issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionEnvelope"
+              example:
+                status: success
+                data:
+                  message: Account created. Welcome aboard!
+                  id: 6ad637c650acb3bb834d20d0
+                  email: player@example.com
+                  token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiI2YWQ2MzdjNjUwYWNiM2JiODM0ZDIwZDAiLCJpYXQiOjE3OTI0MjM5MjcsImV4cCI6MTc5NTAxNTkyN30.GTmWrjlIaKheW0KCFS3y4uMIeLVPZtmkfCF9j0ldkuQ
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/auth/login:
+    post:
+      tags: [Authentication]
+      summary: Exchange credentials for a JWT
+      operationId: loginUser
+      security: []
+      description: |
+        Verifies the e-mail/password pair and issues a new JWT.
+
+        The response is intentionally identical for an unknown address and for a wrong password, so the
+        endpoint cannot be used to enumerate accounts. The stored address is lower-cased, so the address
+        in the response is the normalised one.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserCredentialsRequest"
+            example:
+              email: player@example.com
+              password: secret123
+      responses:
+        "200":
+          description: Credentials accepted and a token was issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionEnvelope"
+              example:
+                status: success
+                data:
+                  message: Login successful. Welcome back!
+                  id: 6ad637c650acb3bb834d20d0
+                  email: player@example.com
+                  token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiI2YWQ2MzdjNjUwYWNiM2JiODM0ZDIwZDAiLCJpYXQiOjE3OTI0MjM5MjcsImV4cCI6MTc5NTAxNTkyN30.GTmWrjlIaKheW0KCFS3y4uMIeLVPZtmkfCF9j0ldkuQ
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Authentication]
+      summary: Log out (client-side token disposal)
+      operationId: logoutUser
+      security: []
+      description: |
+        Acknowledges a logout request. The endpoint is public and does **not** require a token.
+
+        The API is stateless: no token is revoked and no server-side session is destroyed. Clients must
+        discard the token themselves.
+      responses:
+        "200":
+          description: Logout acknowledged.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageEnvelope"
+              example:
+                status: success
+                data:
+                  message: Good Bye!
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/user:
+    get:
+      tags: [User]
+      summary: Get the authenticated user's profile
+      operationId: getCurrentUser
+      description: |
+        Returns the profile of the user identified by the `userId` claim of the bearer token.
+
+        If the account has been deleted while the token was still valid, the endpoint answers `401`
+        with the message `User is not authenticated.`
+      responses:
+        "200":
+          description: The authenticated user's profile.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfileEnvelope"
+              example:
+                status: success
+                data:
+                  message: User retrieved successfully.
+                  id: 6ad637c650acb3bb834d20d0
+                  email: player@example.com
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    patch:
+      tags: [User]
+      summary: Update the authenticated user's profile
+      operationId: updateCurrentUser
+      description: |
+        Updates the authenticated account. Only `email` and `password` are applied; any other key is
+        rejected by the strict schema.
+
+        * A new password is hashed with bcrypt before it is written.
+        * The response echoes the stored (lower-cased) e-mail.
+        * An empty body is valid and returns `200` without changing anything.
+        * The token is **not** rotated: existing tokens stay valid after a password change.
+
+        Changing the address to one that is already taken hits the unique index on `email`. As with
+        registration, the current implementation reports this as `500` (see the note on
+        `POST /api/v1/auth/register`); the intended answer is `409` with
+        `{ "code": 11000, "message": "Email already exists." }`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserPatchRequest"
+            examples:
+              email:
+                summary: Change the e-mail address
+                value:
+                  email: new.address@example.com
+              password:
+                summary: Change the password
+                value:
+                  password: newsecret123
+      responses:
+        "200":
+          description: The account was updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfileEnvelope"
+              example:
+                status: success
+                data:
+                  message: Account updated successfully.
+                  id: 6ad637c650acb3bb834d20d0
+                  email: new.address@example.com
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    delete:
+      tags: [User]
+      summary: Delete the authenticated user's account
+      operationId: deleteCurrentUser
+      description: |
+        Deletes the authenticated account **and every journal entry it owns** (cascade delete). Both
+        operations are executed together.
+
+        The account is removed permanently; the token becomes useless because subsequent requests resolve
+        to a user that no longer exists.
+      responses:
+        "200":
+          description: The account and its journal entries were deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageEnvelope"
+              example:
+                status: success
+                data:
+                  message: User deleted successfully.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/entries:
+    get:
+      tags: [Journal Entries]
+      summary: List the authenticated user's journal entries
+      operationId: listJournalEntries
+      description: |
+        Returns one page of the authenticated user's entries, newest first.
+
+        Ordering is `entryDate` descending with `_id` descending as a tie-breaker, and the result is
+        always scoped to the token's `userId`.
+
+        All filters are optional and are combined with a logical AND. Unknown or unusable filter values
+        are silently ignored rather than rejected:
+
+        * `limit` — parsed with `parseInt`. A missing, non-numeric or `0` value falls back to `20`. The
+          server applies no upper bound.
+        * `title` — matched as a **case-insensitive regular expression** (`new RegExp(title, 'i')`).
+          A value containing unbalanced regex metacharacters (for example `bad(regex`) makes the
+          expression throw and the request fails with `500`.
+        * `status`, `platform` — exact, case-sensitive equality. The values are not validated against the
+          status enum, so an unknown status simply matches nothing.
+        * `rating` — parsed with `parseInt`; a non-numeric value is ignored.
+        * `startDate`, `endDate` — parsed with `new Date()` (any JavaScript-parseable date string is
+          accepted) and applied to `entryDate` as `$gte` / `$lte`. An unparseable value is ignored.
+        * `cursor` — the opaque token returned as `nextCursor` by a previous call. An invalid cursor is
+          ignored and the first page is returned.
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum number of entries to return. Defaults to `20` when absent, non-numeric or `0`.
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 20
+          example: 20
+        - name: cursor
+          in: query
+          description: |
+            Opaque keyset cursor returned as `data.nextCursor` by a previous call. It is the base64
+            encoding of `{"entryDate":"<ISO datetime>","_id":"<24-hex ObjectId>"}` and must be sent back
+            verbatim.
+          required: false
+          schema:
+            type: string
+          example: eyJlbnRyeURhdGUiOiIyMDI1LTAzLTAxVDEwOjAwOjAwLjAwMFoiLCJfaWQiOiI2YWQ2MzdjNjUwYWNiM2JiODM0ZDIwZDIifQ==
+        - name: title
+          in: query
+          description: Case-insensitive regular expression matched against the entry title.
+          required: false
+          schema:
+            type: string
+          example: hades
+        - name: status
+          in: query
+          description: Exact status to filter by.
+          required: false
+          schema:
+            $ref: "#/components/schemas/JournalEntryStatus"
+          example: completed
+        - name: platform
+          in: query
+          description: Exact platform to filter by (case-sensitive).
+          required: false
+          schema:
+            type: string
+          example: PC
+        - name: rating
+          in: query
+          description: Exact rating to filter by. Parsed with `parseInt`; non-numeric values are ignored.
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 10
+          example: 9
+        - name: startDate
+          in: query
+          description: Earliest `entryDate` to include (inclusive, `$gte`). Unparseable values are ignored.
+          required: false
+          schema:
+            type: string
+            format: date-time
+          example: "2025-01-01T00:00:00.000Z"
+        - name: endDate
+          in: query
+          description: Latest `entryDate` to include (inclusive, `$lte`). Unparseable values are ignored.
+          required: false
+          schema:
+            type: string
+            format: date-time
+          example: "2025-12-31T23:59:59.999Z"
+      responses:
+        "200":
+          description: One page of journal entries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalEntryPageEnvelope"
+              example:
+                status: success
+                data:
+                  entries:
+                    - _id: 6ad637c650acb3bb834d20d2
+                      createdBy: 6ad637c650acb3bb834d20d0
+                      title: Hades
+                      platform: PC
+                      status: completed
+                      entryDate: "2025-03-01T10:00:00.000Z"
+                      rating: 9
+                      notes: Runs &amp; roses
+                      createdAt: "2026-02-14T18:22:11.001Z"
+                      updatedAt: "2026-02-14T18:22:11.001Z"
+                      __v: 0
+                    - _id: 6ad637c650acb3bb834d20d3
+                      createdBy: 6ad637c650acb3bb834d20d0
+                      title: Celeste
+                      platform: Switch
+                      status: started
+                      entryDate: "2024-11-05T08:30:00.000Z"
+                      createdAt: "2026-02-14T18:22:11.002Z"
+                      updatedAt: "2026-02-14T18:22:11.002Z"
+                      __v: 0
+                  nextCursor: eyJlbnRyeURhdGUiOiIyMDI1LTAzLTAxVDEwOjAwOjAwLjAwMFoiLCJfaWQiOiI2YWQ2MzdjNjUwYWNiM2JiODM0ZDIwZDIifQ==
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    post:
+      tags: [Journal Entries]
+      summary: Create a journal entry
+      operationId: createJournalEntry
+      description: |
+        Creates an entry owned by the authenticated user and returns the stored document.
+
+        The body is validated with a strict schema and two cross-field rules that are enforced before the
+        document is written:
+
+        * `status: "completed"` **requires** a `rating`;
+        * a `rating` is **only allowed** when `status` is `"completed"`.
+
+        The `entryDate` must be an ISO 8601 instant in UTC form (`YYYY-MM-DDTHH:mm:ss[.sss]Z`). Offsets
+        such as `+02:00` and local timestamps without a zone are rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JournalEntryCreateRequest"
+            examples:
+              completed:
+                summary: A finished game with a rating
+                value:
+                  title: Hades
+                  platform: PC
+                  status: completed
+                  rating: 9
+                  notes: Runs & roses
+                  entryDate: "2025-03-01T10:00:00.000Z"
+              inProgress:
+                summary: A game in progress (no rating allowed)
+                value:
+                  title: Celeste
+                  platform: Switch
+                  status: started
+                  entryDate: "2024-11-05T08:30:00.000Z"
+      responses:
+        "201":
+          description: The entry was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalEntryEnvelope"
+              example:
+                status: success
+                data:
+                  message: New journal entry created.
+                  content:
+                    _id: 6ad637c650acb3bb834d20d2
+                    createdBy: 6ad637c650acb3bb834d20d0
+                    title: Hades
+                    platform: PC
+                    status: completed
+                    entryDate: "2025-03-01T10:00:00.000Z"
+                    rating: 9
+                    notes: Runs &amp; roses
+                    createdAt: "2026-02-14T18:22:11.001Z"
+                    updatedAt: "2026-02-14T18:22:11.001Z"
+                    __v: 0
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/entries/statistics:
+    get:
+      tags: [Journal Entries]
+      summary: Aggregate statistics for the authenticated user's entries
+      operationId: getJournalEntriesStatistics
+      description: |
+        Returns two aggregations over the authenticated user's entries:
+
+        * `lifetime` — the total number of entries per status, for the whole history.
+        * `byYear` — the number of entries per status, grouped by the calendar year of `entryDate`.
+
+        Only statuses that actually occur are present as keys, and an empty history yields two empty
+        objects. The year keys are the years found in `entryDate` (for example `"2025"`).
+      responses:
+        "200":
+          description: The aggregated statistics.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalStatsEnvelope"
+              example:
+                status: success
+                data:
+                  message: Statistics retrieved successfully.
+                  lifetime:
+                    started: 2
+                    completed: 1
+                    paused: 1
+                    dropped: 1
+                    revisited: 0
+                  byYear:
+                    "2025":
+                      completed: 1
+                    "2024":
+                      started: 2
+                      paused: 1
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /api/v1/entries/{id}:
+    parameters:
+      - $ref: "#/components/parameters/EntryId"
+    get:
+      tags: [Journal Entries]
+      summary: Get a single journal entry
+      operationId: getJournalEntryById
+      description: |
+        Returns the entry identified by `id`, but only if it belongs to the authenticated user. An entry
+        owned by somebody else is reported as `404 Journal entry not found.` — the API never confirms
+        that a foreign entry exists.
+      responses:
+        "200":
+          description: The requested entry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalEntryEnvelope"
+              example:
+                status: success
+                data:
+                  message: Journal entry found.
+                  content:
+                    _id: 6ad637c650acb3bb834d20d2
+                    createdBy: 6ad637c650acb3bb834d20d0
+                    title: Hades
+                    platform: PC
+                    status: completed
+                    entryDate: "2025-03-01T10:00:00.000Z"
+                    rating: 9
+                    notes: Runs &amp; roses
+                    createdAt: "2026-02-14T18:22:11.001Z"
+                    updatedAt: "2026-02-14T18:22:11.001Z"
+                    __v: 0
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    patch:
+      tags: [Journal Entries]
+      summary: Update a journal entry
+      operationId: updateJournalEntry
+      description: |
+        Applies a partial update to an entry owned by the authenticated user and returns the **complete
+        updated document**.
+
+        Only `title`, `platform`, `status`, `rating`, `notes` and `entryDate` are applied. The body schema
+        is strict, so unknown keys are rejected with `400`, and an empty body is accepted by the schema
+        but rejected by the domain guard with `400 No valid update data provided.`
+
+        **Domain rules.** The status/rating consistency is evaluated against the *merged* state (the
+        patched fields together with the stored ones), not against the request body alone:
+
+        * the resulting status must be `completed` for a rating to be present, otherwise
+          `400 Rating is only allowed when status is completed.`;
+        * a resulting status of `completed` requires a rating, otherwise
+          `400 Rating is required when status is completed.`
+
+        For example, an entry stored as `status: "completed", rating: 9` cannot be moved to
+        `status: "started"` in a single call, and an entry stored as `status: "started"` without a
+        rating cannot be moved to `status: "completed"` in a single call — both need the rating to be
+        adjusted in the same request.
+
+        > The TypeScript type declared in `src/types/api.ts` for this payload (`JournalEntryPatchBody`)
+        > does not match the runtime response, which is the full `JournalEntry` document. The schema
+        > below reflects the runtime behaviour.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JournalEntryPatchRequest"
+            examples:
+              title:
+                summary: Rename an entry
+                value:
+                  title: Hades II
+              completeWithRating:
+                summary: Complete an entry and set its rating in one call
+                value:
+                  status: completed
+                  rating: 8
+      responses:
+        "200":
+          description: The entry was updated; the complete document is returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalEntryUpdateEnvelope"
+              example:
+                status: success
+                data:
+                  message: Journal entry updated.
+                  journalEntry:
+                    _id: 6ad637c650acb3bb834d20d2
+                    createdBy: 6ad637c650acb3bb834d20d0
+                    title: Hades II
+                    platform: PC
+                    status: completed
+                    entryDate: "2025-03-01T10:00:00.000Z"
+                    rating: 8
+                    notes: Runs &amp; roses
+                    createdAt: "2026-02-14T18:22:11.001Z"
+                    updatedAt: "2026-02-14T19:03:44.512Z"
+                    __v: 0
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+    delete:
+      tags: [Journal Entries]
+      summary: Delete a journal entry
+      operationId: deleteJournalEntry
+      description: |
+        Deletes the entry identified by `id`. The entry must belong to the authenticated user; a foreign
+        entry is reported as `404 No journal entry found.`
+      responses:
+        "200":
+          description: The entry was deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageEnvelope"
+              example:
+                status: success
+                data:
+                  message: Deleted successfully.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        A HS256 JSON Web Token issued by `POST /api/v1/auth/register` or `POST /api/v1/auth/login`.
+
+        Send it as `Authorization: Bearer <token>`. The token payload is
+        `{ "userId": "<24-hex ObjectId>", "iat": <n>, "exp": <n> }` and its lifetime is controlled by the
+        server's `JWT_LIFETIME` environment variable.
+
+  parameters:
+    EntryId:
+      name: id
+      in: path
+      required: true
+      description: |
+        The MongoDB ObjectId of the journal entry. It is validated before any database access; a value
+        that is not a 24-character hexadecimal ObjectId is rejected with `400 Invalid id format`.
+      schema:
+        type: string
+        pattern: "^[0-9a-fA-F]{24}$"
+        example: 6ad637c650acb3bb834d20d2
+
+  responses:
+    BadRequest:
+      description: |
+        The request failed schema validation or violated a domain rule.
+
+        `data.message` contains the Zod issue messages joined with `". "`, or the message of the domain
+        guard that rejected the request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          examples:
+            invalidEmail:
+              summary: Malformed e-mail address
+              value:
+                status: error
+                data:
+                  message: Invalid email address
+            shortPassword:
+              summary: Password shorter than 6 characters
+              value:
+                status: error
+                data:
+                  message: Password must contain at least 6 characters
+            unrecognizedKey:
+              summary: Unknown key in a strict body
+              value:
+                status: error
+                data:
+                  message: 'Unrecognized key: "foo"'
+            missingFields:
+              summary: Required field missing
+              value:
+                status: error
+                data:
+                  message: "Invalid input: expected string, received undefined. Invalid input: expected string, received undefined"
+            invalidStatus:
+              summary: Status outside the enum
+              value:
+                status: error
+                data:
+                  message: 'Invalid option: expected one of "started"|"completed"|"revisited"|"paused"|"dropped"'
+            invalidEntryDate:
+              summary: entryDate is not a UTC ISO 8601 instant
+              value:
+                status: error
+                data:
+                  message: Date must be a valid ISO datetime string.
+            ratingRequired:
+              summary: status "completed" without a rating
+              value:
+                status: error
+                data:
+                  message: Rating is required when status is completed.
+            ratingNotAllowed:
+              summary: A rating on an entry that is not completed
+              value:
+                status: error
+                data:
+                  message: Rating is only allowed for completed entries.
+            invalidObjectId:
+              summary: The path parameter is not a valid ObjectId
+              value:
+                status: error
+                data:
+                  message: Invalid id format
+            noValidUpdateData:
+              summary: The PATCH body contained no updatable field
+              value:
+                status: error
+                data:
+                  message: No valid update data provided.
+    Unauthorized:
+      description: |
+        The request could not be authenticated.
+
+        Possible `data.message` values:
+
+        * `Authorization header missing or malformed. Expected format: Bearer 'token'.`
+        * `JWT verification failed: token is invalid, expired, or tampered with.`
+        * `JWT payload missing required userId. Token structure invalid.`
+        * `User is not authenticated.` — the account behind a valid token no longer exists.
+        * `There is an issue with your email or password. Please try again.` — failed login.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          examples:
+            missingHeader:
+              summary: Missing or malformed Authorization header
+              value:
+                status: error
+                data:
+                  message: "Authorization header missing or malformed. Expected format: Bearer 'token'."
+            invalidToken:
+              summary: Invalid, expired or tampered token
+              value:
+                status: error
+                data:
+                  message: "JWT verification failed: token is invalid, expired, or tampered with."
+            invalidCredentials:
+              summary: Failed login
+              value:
+                status: error
+                data:
+                  message: There is an issue with your email or password. Please try again.
+    NotFound:
+      description: |
+        The resource does not exist, or it does not belong to the authenticated user.
+
+        Possible `data.message` values: `Journal entry not found.`, `Journal entry was not found.`,
+        `No journal entry found.`, `User does not exist.`, `User was not found.`
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          examples:
+            entryNotFound:
+              summary: The entry does not exist (or belongs to another user)
+              value:
+                status: error
+                data:
+                  message: Journal entry not found.
+            userNotFound:
+              summary: The account behind the token no longer exists
+              value:
+                status: error
+                data:
+                  message: User was not found.
+    TooManyRequests:
+      description: |
+        The global rate limit (300 requests per 15 minutes per IP) was exceeded.
+
+        This body does **not** use the standard envelope: `status` is the number `429` and the payload
+        key is `error`. The response also carries a `Retry-After: 900` header.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RateLimitError"
+          example:
+            status: 429
+            error: Too many requests, please try again later.
+    InternalServerError:
+      description: |
+        An unexpected error occurred. The response carries the error message and a unique `errorId`
+        (UUID v4) that correlates with the server log entry.
+
+        Because the message of an unknown error is forwarded as-is, it can contain low-level details
+        (for example the raw MongoDB driver message of a duplicate-key error).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          examples:
+            unknownError:
+              summary: Unhandled server-side error
+              value:
+                status: error
+                data:
+                  message: 'E11000 duplicate key error collection: game-journal.users index: email_1 dup key: { email: "player@example.com" }'
+                  errorId: 7a5bb72c-f932-4ea7-9941-81e2850f70d1
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      description: Standard error envelope.
+      required: [status, data]
+      properties:
+        status:
+          type: string
+          const: error
+          description: Always the literal string `error`.
+        data:
+          $ref: "#/components/schemas/ErrorData"
+
+    ErrorData:
+      type: object
+      description: Error details.
+      required: [message]
+      properties:
+        message:
+          type: string
+          description: Human-readable description of the failure.
+        errorId:
+          type: string
+          format: uuid
+          description: |
+            Unique identifier of the failed request, used to correlate the response with the server log.
+            Only present for unhandled errors (HTTP 500).
+
+    RateLimitError:
+      type: object
+      description: |
+        Rate-limit rejection. This is the only JSON error payload that does not follow the standard
+        envelope: `status` is the numeric HTTP status and the details live under `error`.
+      required: [status, error]
+      properties:
+        status:
+          type: integer
+          const: 429
+          description: The numeric HTTP status code.
+        error:
+          type: string
+          description: Human-readable description of the failure.
+          example: Too many requests, please try again later.
+
+    MessageEnvelope:
+      type: object
+      description: Success envelope carrying only a message.
+      required: [status, data]
+      properties:
+        status:
+          type: string
+          const: success
+        data:
+          type: object
+          required: [message]
+          properties:
+            message:
+              type: string
+              description: Human-readable confirmation.
+              example: Deleted successfully.
+
+    AuthSessionEnvelope:
+      type: object
+      description: Success envelope carrying the authenticated session.
+      required: [status, data]
+      properties:
+        status:
+          type: string
+          const: success
+        data:
+          $ref: "#/components/schemas/AuthSession"
+
+    AuthSession:
+      type: object
+      description: An authenticated session.
+      required: [message, id, email, token]
+      properties:
+        message:
+          type: string
+          description: Human-readable confirmation.
+          example: Login successful. Welcome back!
+        id:
+          type: string
+          pattern: "^[0-9a-fA-F]{24}$"
+          description: The user's MongoDB ObjectId as a hexadecimal string.
+          example: 6ad637c650acb3bb834d20d0
+        email:
+          type: string
+          format: email
+          description: The stored (lower-cased) e-mail address.
+          example: player@example.com
+        token:
+          type: string
+          description: "The signed HS256 JWT to be sent as `Authorization: Bearer <token>`."
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiI2YWQ2MzdjNjUwYWNiM2JiODM0ZDIwZDAiLCJpYXQiOjE3OTI0MjM5MjcsImV4cCI6MTc5NTAxNTkyN30.GTmWrjlIaKheW0KCFS3y4uMIeLVPZtmkfCF9j0ldkuQ
+
+    UserProfileEnvelope:
+      type: object
+      description: Success envelope carrying the authenticated user's profile.
+      required: [status, data]
+      properties:
+        status:
+          type: string
+          const: success
+        data:
+          $ref: "#/components/schemas/UserProfile"
+
+    UserProfile:
+      type: object
+      description: The authenticated user's profile.
+      required: [message, id, email]
+      properties:
+        message:
+          type: string
+          description: Human-readable confirmation.
+          example: User retrieved successfully.
+        id:
+          type: string
+          pattern: "^[0-9a-fA-F]{24}$"
+          description: The user's MongoDB ObjectId as a hexadecimal string.
+          example: 6ad637c650acb3bb834d20d0
+        email:
+          type: string
+          format: email
+          description: The stored (lower-cased) e-mail address.
+          example: player@example.com
+
+    JournalEntryEnvelope:
+      type: object
+      description: Success envelope carrying a single journal entry.
+      required: [status, data]
+      properties:
+        status:
+          type: string
+          const: success
+        data:
+          type: object
+          required: [message, content]
+          properties:
+            message:
+              type: string
+              description: Human-readable confirmation.
+              example: Journal entry found.
+            content:
+              $ref: "#/components/schemas/JournalEntry"
+
+    JournalEntryUpdateEnvelope:
+      type: object
+      description: Success envelope carrying the updated journal entry.
+      required: [status, data]
+      properties:
+        status:
+          type: string
+          const: success
+        data:
+          type: object
+          required: [message, journalEntry]
+          properties:
+            message:
+              type: string
+              description: Human-readable confirmation.
+              example: Journal entry updated.
+            journalEntry:
+              $ref: "#/components/schemas/JournalEntry"
+
+    JournalEntryPageEnvelope:
+      type: object
+      description: Success envelope carrying one page of journal entries.
+      required: [status, data]
+      properties:
+        status:
+          type: string
+          const: success
+        data:
+          type: object
+          required: [entries, nextCursor]
+          properties:
+            entries:
+              type: array
+              description: The entries of the current page, newest first.
+              items:
+                $ref: "#/components/schemas/JournalEntry"
+            nextCursor:
+              type: [string, "null"]
+              description: |
+                Opaque cursor for the next page, or `null` when the last page has been reached. Send it
+                back as the `cursor` query parameter.
+              default: null
+              example: eyJlbnRyeURhdGUiOiIyMDI1LTAzLTAxVDEwOjAwOjAwLjAwMFoiLCJfaWQiOiI2YWQ2MzdjNjUwYWNiM2JiODM0ZDIwZDIifQ==
+
+    JournalStatsEnvelope:
+      type: object
+      description: Success envelope carrying the aggregated statistics.
+      required: [status, data]
+      properties:
+        status:
+          type: string
+          const: success
+        data:
+          $ref: "#/components/schemas/JournalStats"
+
+    JournalStats:
+      type: object
+      description: Aggregated statistics of the authenticated user's entries.
+      required: [message, lifetime, byYear]
+      properties:
+        message:
+          type: string
+          description: Human-readable confirmation.
+          example: Statistics retrieved successfully.
+        lifetime:
+          type: object
+          description: Total number of entries per status, over the whole history.
+          additionalProperties:
+            type: integer
+            minimum: 0
+          example:
+            started: 2
+            completed: 1
+        byYear:
+          type: object
+          description: Number of entries per status, grouped by the calendar year of `entryDate`.
+          additionalProperties:
+            type: object
+            additionalProperties:
+              type: integer
+              minimum: 0
+          example:
+            "2025":
+              completed: 1
+            "2024":
+              started: 2
+
+    JournalEntry:
+      type: object
+      description: |
+        A journal entry as it is stored in MongoDB and returned by the API.
+
+        `rating` and `notes` are **omitted** (not `null`) when they have never been set. `__v` is
+        Mongoose's version key and is always present.
+      required:
+        [
+          _id,
+          createdBy,
+          title,
+          platform,
+          status,
+          entryDate,
+          createdAt,
+          updatedAt,
+          __v,
+        ]
+      properties:
+        _id:
+          type: string
+          pattern: "^[0-9a-fA-F]{24}$"
+          description: The entry's MongoDB ObjectId as a hexadecimal string.
+          example: 6ad637c650acb3bb834d20d2
+        createdBy:
+          type: string
+          pattern: "^[0-9a-fA-F]{24}$"
+          description: The ObjectId of the owning user.
+          example: 6ad637c650acb3bb834d20d0
+        title:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Title of the game or the entry.
+          example: Hades
+        platform:
+          type: string
+          minLength: 1
+          description: Platform the game was played on.
+          example: PC
+        status:
+          $ref: "#/components/schemas/JournalEntryStatus"
+        entryDate:
+          type: string
+          format: date-time
+          description: |
+            The moment the entry refers to, in UTC. It is the field used for ordering and for
+            cursor-based pagination.
+          example: "2025-03-01T10:00:00.000Z"
+        rating:
+          type: number
+          minimum: 0
+          maximum: 10
+          description: Score given to a completed game. Absent when the entry has no rating.
+          example: 9
+        notes:
+          type: string
+          maxLength: 1000
+          description: Free-form notes. Absent when the entry has no notes.
+          example: Runs &amp; roses
+        createdAt:
+          type: string
+          format: date-time
+          description: When the document was created.
+          example: "2026-02-14T18:22:11.001Z"
+        updatedAt:
+          type: string
+          format: date-time
+          description: When the document was last modified.
+          example: "2026-02-14T18:22:11.001Z"
+        __v:
+          type: integer
+          description: Mongoose version key.
+          example: 0
+
+    JournalEntryStatus:
+      type: string
+      description: The play status of an entry.
+      enum: [started, completed, revisited, paused, dropped]
+      example: completed
+
+    UserCredentialsRequest:
+      type: object
+      description: |
+        Credentials for registration and login. The schema is strict, so any additional property is
+        rejected with `400`.
+      required: [email, password]
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          description: The account's e-mail address. Stored lower-cased.
+          example: player@example.com
+        password:
+          type: string
+          minLength: 6
+          description: Plain-text password, at least 6 characters long. Trimmed before it is validated.
+          example: secret123
+
+    UserPatchRequest:
+      type: object
+      description: |
+        Partial update of the authenticated account. The schema is strict, so any additional property is
+        rejected with `400`. An empty body is valid and changes nothing.
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          format: email
+          description: The new e-mail address. Stored lower-cased.
+          example: new.address@example.com
+        password:
+          type: string
+          minLength: 6
+          description: The new plain-text password. Re-hashed with bcrypt before it is stored.
+          example: newsecret123
+
+    JournalEntryCreateRequest:
+      type: object
+      description: |
+        The body of a journal-entry creation request. The schema is strict, so any additional property
+        is rejected with `400`.
+      required: [title, platform, status, entryDate]
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Title of the game or the entry. Trimmed; must not be empty.
+          example: Hades
+        platform:
+          type: string
+          minLength: 1
+          description: Platform the game was played on. Trimmed; must not be empty.
+          example: PC
+        status:
+          $ref: "#/components/schemas/JournalEntryStatus"
+        rating:
+          type: number
+          minimum: 0
+          maximum: 10
+          description: Score given to a completed game. Required when `status` is `completed` and forbidden otherwise.
+          example: 9
+        notes:
+          type: string
+          maxLength: 1000
+          description: Free-form notes. Trimmed.
+          example: Runs & roses
+        entryDate:
+          type: string
+          format: date-time
+          pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$'
+          description: |
+            The moment the entry refers to, in UTC.
+
+            The schema accepts only UTC instants ending in `Z` (`2025-03-01T10:00:00.000Z` or
+            `2025-03-01T10:00:00Z`). Local timestamps and explicit offsets such as `+02:00` are rejected
+            with `400 Date must be a valid ISO datetime string.`
+          example: "2025-03-01T10:00:00.000Z"
+      allOf:
+        - if:
+            properties:
+              status:
+                const: completed
+            required: [status]
+          then:
+            required: [rating]
+          else:
+            not:
+              required: [rating]
+
+    JournalEntryPatchRequest:
+      type: object
+      description: |
+        Partial update of a journal entry. The schema is strict, so any additional property is rejected
+        with `400`.
+
+        The status/rating consistency is **not** expressed here: it is enforced by the server against the
+        merged (patched + stored) state, so `status` and `rating` must be adjusted in the same request.
+        See the endpoint description for details.
+      additionalProperties: false
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: New title. Trimmed; must not be empty.
+          example: Hades II
+        platform:
+          type: string
+          minLength: 1
+          description: New platform. Trimmed; must not be empty.
+          example: PC
+        status:
+          $ref: "#/components/schemas/JournalEntryStatus"
+        rating:
+          type: number
+          minimum: 0
+          maximum: 10
+          description: New rating. Only valid for a resulting status of `completed`.
+          example: 8
+        notes:
+          type: string
+          maxLength: 1000
+          description: New notes. Trimmed.
+          example: Runs & roses
+        entryDate:
+          type: string
+          format: date-time
+          pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$'
+          description: New entry date, in UTC.
+          example: "2025-03-01T10:00:00.000Z"
