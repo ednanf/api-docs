@@ -9,6 +9,7 @@ const config: ZudokuConfig = {
       width: "130px",
     },
   },
+  basePath: "/api-docs",
   navigation: [
     {
       type: "custom-page",
