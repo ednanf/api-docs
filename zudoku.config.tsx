@@ -37,6 +37,11 @@ const config: ZudokuConfig = {
       element: <HomePage />,
     },
     {
+      type: "doc",
+      file: "api/plainly",
+      label: "Plainly",
+    },
+    {
       type: "link",
       label: "School API",
       to: "/api/school-api",
