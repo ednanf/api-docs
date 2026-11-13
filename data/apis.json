@@ -1,5 +1,11 @@
 [
   {
+    "title": "Plainly",
+    "description": "Product and technical overview of Plainly, a minimal productivity PWA developed with OpenAI Codex.",
+    "href": "/api/plainly",
+    "linkLabel": "Explore overview"
+  },
+  {
     "title": "School API",
     "description": "API reference for the school management system.",
     "href": "/api/school-api",
