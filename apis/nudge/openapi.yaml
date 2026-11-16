@@ -1,0 +1,1086 @@
+openapi: '3.1.1'
+info:
+  title: 'Nudge API'
+  version: '0.1.0'
+  description: 'Implementation reference for the single-administrator Nudge application. All paths are relative to /api. Browser writes require an exact trusted Origin and application/json, including writes with ignored bodies. Same-origin browser clients handle the HttpOnly cookie automatically; other clients must retain Set-Cookie and send the cookie on protected requests. Browser tools hosted on another origin cannot override browser Origin/Cookie restrictions. Timestamp numbers are epoch milliseconds. Remote-check failure is represented by success:false in an HTTP 200 response. Production deployment URLs are intentionally omitted.'
+  contact:
+    name: 'Ednan Frizzera'
+    url: 'https://github.com/ednanf'
+  license:
+    name: 'Proprietary; all rights reserved'
+    url: 'https://github.com/ednanf/nudge/blob/main/LICENSE'
+servers:
+  - url: 'http://localhost:5173/api'
+    description: 'Local development. Replace this server URL with the API base URL of your own installation; do not publish private deployment addresses.'
+externalDocs:
+  description: 'Nudge technical Wiki and API reference'
+  url: 'https://github.com/ednanf/nudge/wiki/Data-model-and-API'
+tags:
+  - name: 'Authentication'
+    description: 'One administrator; cookie sessions, login and logout.'
+  - name: 'Projects'
+    description: 'Encrypted portfolio connection configuration and unsaved tests.'
+  - name: 'Executions'
+    description: 'Persisted checks and sanitized execution history.'
+  - name: 'Scheduling'
+    description: 'Independently authorized weekly cron execution.'
+security:
+  - SessionCookie: []
+paths:
+  '/auth/login':
+    post:
+      tags:
+        - 'Authentication'
+      operationId: 'login'
+      summary: 'Sign in as the administrator'
+      description: 'Creates an opaque HttpOnly, SameSite=Strict session cookie (Secure on Vercel/HTTPS). Default lifetime is 7 days, or 30 days with rememberMe:true. Every password-verification attempt counts against a persisted global limit of five per 15-minute bucket. A session cookie presented by this browser is revoked on successful login.'
+      security: []
+      parameters:
+        - '$ref': '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          'application/json':
+            schema:
+              '$ref': '#/components/schemas/LoginRequest'
+            example:
+              password: 'example-admin-password'
+              rememberMe: true
+      responses:
+        '200':
+          description: 'Authenticated; store Set-Cookie in the client cookie jar.'
+          headers:
+            Cache-Control:
+              '$ref': '#/components/headers/NoStore'
+            Set-Cookie:
+              '$ref': '#/components/headers/SessionCookie'
+          content:
+            'application/json':
+              schema:
+                '$ref': '#/components/schemas/LoginSuccess'
+        '400':
+          '$ref': '#/components/responses/BadRequest'
+        '401':
+          '$ref': '#/components/responses/Unauthorized'
+        '403':
+          '$ref': '#/components/responses/ForbiddenOrigin'
+        '413':
+          '$ref': '#/components/responses/PayloadTooLarge'
+        '415':
+          '$ref': '#/components/responses/UnsupportedMediaType'
+        '429':
+          '$ref': '#/components/responses/RateLimited'
+        '500':
+          '$ref': '#/components/responses/ServerError'
+  '/auth/logout':
+    post:
+      tags:
+        - 'Authentication'
+      operationId: 'logout'
+      summary: 'Revoke the active session'
+      parameters:
+        - '$ref': '#/components/parameters/Origin'
+      requestBody:
+        required: false
+        content:
+          'application/json':
+            schema: {}
+            example: {}
+        description: 'The handler does not parse this body. Origin and Content-Type: application/json remain mandatory; send {} in API clients so the media type is included.'
+      responses:
+        '200':
+          description: 'Active session deleted and browser cookie expired.'
+          headers:
+            Cache-Control:
+              '$ref': '#/components/headers/NoStore'
+            Set-Cookie:
+              '$ref': '#/components/headers/ExpiredSessionCookie'
+          content:
+            'application/json':
+              schema:
+                '$ref': '#/components/schemas/LogoutSuccess'
+        '401':
+          '$ref': '#/components/responses/Unauthorized'
+        '403':
+          '$ref': '#/components/responses/ForbiddenOrigin'
+        '415':
+          '$ref': '#/components/responses/UnsupportedMediaType'
+        '500':
+          '$ref': '#/components/responses/ServerError'
+  '/auth/session':
+    get:
+      tags:
+        - 'Authentication'
+      operationId: 'getSession'
+      summary: 'Inspect the browser session'
+      description: 'Unauthenticated, expired and malformed cookies normally return HTTP 200 with authenticated:false. A valid cookie returns true; database/configuration failures can still return 500.'
+      security: []
+      responses:
+        '200':
+          description: 'Request completed.'
+          headers:
+            Cache-Control:
+              '$ref': '#/components/headers/NoStore'
+          content:
+            'application/json':
+              schema:
+                '$ref': '#/components/schemas/SessionStatus'
+        '500':
+          '$ref': '#/components/responses/ServerError'
+  '/projects':
+    get:
+      tags:
+        - 'Projects'
+      operationId: 'listProjects'
+      summary: 'List projects and scheduling information'
+      description: 'Returns public configuration and the latest retained check for each project. No credential values are returned. There are no pagination/filter query parameters.'
+      responses:
+        '200':
+          description: 'Request completed.'
+          headers:
+            Cache-Control:
+              '$ref': '#/components/headers/NoStore'
+          content:
+            'application/json':
+              schema:
+                '$ref': '#/components/schemas/ProjectList'
+        '401':
+          '$ref': '#/components/responses/Unauthorized'
+        '500':
+          '$ref': '#/components/responses/ServerError'
+    post:
+      tags:
+        - 'Projects'
+      operationId: 'createProject'
+      summary: 'Register a portfolio project'
+      description: 'Encrypts username, password and extra authentication JSON. Enforces the ten-project cap atomically. Saving validates configuration but does not contact the portfolio API.'
+      parameters:
+        - '$ref': '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          'application/json':
+            schema:
+              '$ref': '#/components/schemas/CreateProjectRequest'
+            example:
+              name: 'Portfolio API'
+              enabled: true
+              username: 'disposable@example.com'
+              password: 'example-disposable-password'
+              authBody: {}
+              config:
+                baseUrl: 'https://api.example.com'
+                authPath: '/api/auth/login'
+                tokenPath: 'data.accessToken'
+                keepAlivePath: '/api/me'
+      responses:
+        '201':
+          description: 'Project created; lastCheck is null.'
+          headers:
+            Cache-Control:
+              '$ref': '#/components/headers/NoStore'
+          content:
+            'application/json':
+              schema:
+                '$ref': '#/components/schemas/SavedProject'
+        '400':
+          '$ref': '#/components/responses/BadRequest'
+        '401':
+          '$ref': '#/components/responses/Unauthorized'
+        '403':
+          '$ref': '#/components/responses/ForbiddenOrigin'
+        '409':
+          '$ref': '#/components/responses/Conflict'
+        '413':
+          '$ref': '#/components/responses/PayloadTooLarge'
+        '415':
+          '$ref': '#/components/responses/UnsupportedMediaType'
+        '500':
+          '$ref': '#/components/responses/ServerError'
+  '/projects/test':
+    post:
+      tags:
+        - 'Projects'
+      operationId: 'testProject'
+      summary: 'Test configuration without saving'
+      description: 'Performs real login and keep-alive requests under the global execution lease. The HTTP work allows 90 seconds total and 75 seconds of socket inactivity for sleeping services. Omit saved credentials and pass an existing id to reuse them. No project or execution-history records are written. HTTP/authentication failures return 200 with success:false.'
+      parameters:
+        - '$ref': '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          'application/json':
+            schema:
+              '$ref': '#/components/schemas/TestProjectRequest'
+            example:
+              name: 'Portfolio API'
+              enabled: true
+              username: 'disposable@example.com'
+              password: 'example-disposable-password'
+              authBody: {}
+              config:
+                baseUrl: 'https://api.example.com'
+                authPath: '/api/auth/login'
+                tokenPath: 'data.accessToken'
+                keepAlivePath: '/api/me'
+      responses:
+        '200':
+          description: 'Connection test completed; inspect success rather than HTTP status alone.'
+          headers:
+            Cache-Control:
+              '$ref': '#/components/headers/NoStore'
+          content:
+            'application/json':
+              schema:
+                '$ref': '#/components/schemas/CheckResult'
+        '400':
+          '$ref': '#/components/responses/BadRequest'
+        '401':
+          '$ref': '#/components/responses/Unauthorized'
+        '403':
+          '$ref': '#/components/responses/ForbiddenOrigin'
+        '404':
+          '$ref': '#/components/responses/NotFound'
+        '409':
+          '$ref': '#/components/responses/Conflict'
+        '413':
+          '$ref': '#/components/responses/PayloadTooLarge'
+        '415':
+          '$ref': '#/components/responses/UnsupportedMediaType'
+        '500':
+          '$ref': '#/components/responses/ServerError'
+  '/projects/{id}':
+    parameters:
+      - '$ref': '#/components/parameters/ProjectId'
+    patch:
+      tags:
+        - 'Projects'
+      operationId: 'updateProject'
+      summary: 'Edit configuration or toggle weekly inclusion'
+      description: 'Send exactly {enabled:boolean} for a schedule-only toggle, which returns {ok:true}. Otherwise supply the full editable name/configuration, not an arbitrary partial object; omit secrets to preserve them and send authBody:{} to clear extra login fields. enabled defaults to true when omitted in a full edit. Full edits return the saved project with lastCheck:null. This route does not acquire the execution lease or cancel a running check.'
+      parameters:
+        - '$ref': '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          'application/json':
+            schema:
+              '$ref': '#/components/schemas/PatchProjectRequest'
+            example:
+              enabled: false
+      responses:
+        '200':
+          description: 'Request completed.'
+          headers:
+            Cache-Control:
+              '$ref': '#/components/headers/NoStore'
+          content:
+            'application/json':
+              schema:
+                '$ref': '#/components/schemas/PatchProjectResponse'
+        '400':
+          '$ref': '#/components/responses/BadRequest'
+        '401':
+          '$ref': '#/components/responses/Unauthorized'
+        '403':
+          '$ref': '#/components/responses/ForbiddenOrigin'
+        '404':
+          '$ref': '#/components/responses/NotFound'
+        '413':
+          '$ref': '#/components/responses/PayloadTooLarge'
+        '415':
+          '$ref': '#/components/responses/UnsupportedMediaType'
+        '500':
+          '$ref': '#/components/responses/ServerError'
+    delete:
+      tags:
+        - 'Projects'
+      operationId: 'deleteProject'
+      summary: 'Delete a project and its history'
+      description: 'Acquires the execution lease and atomically deletes the project and its execution history. Does not delete the portfolio account. There is no application undo.'
+      parameters:
+        - '$ref': '#/components/parameters/Origin'
+      requestBody:
+        required: false
+        content:
+          'application/json':
+            schema: {}
+            example: {}
+        description: 'The handler does not parse this body. Origin and Content-Type: application/json remain mandatory; send {} in API clients so the media type is included.'
+      responses:
+        '200':
+          description: 'Request completed.'
+          headers:
+            Cache-Control:
+              '$ref': '#/components/headers/NoStore'
+          content:
+            'application/json':
+              schema:
+                '$ref': '#/components/schemas/Ok'
+        '401':
+          '$ref': '#/components/responses/Unauthorized'
+        '403':
+          '$ref': '#/components/responses/ForbiddenOrigin'
+        '404':
+          '$ref': '#/components/responses/NotFound'
+        '409':
+          '$ref': '#/components/responses/Conflict'
+        '415':
+          '$ref': '#/components/responses/UnsupportedMediaType'
+        '500':
+          '$ref': '#/components/responses/ServerError'
+  '/projects/{id}/check':
+    parameters:
+      - '$ref': '#/components/parameters/ProjectId'
+    post:
+      tags:
+        - 'Executions'
+      operationId: 'checkProject'
+      summary: 'Run and record a manual check'
+      description: 'Authenticates and calls the configured portfolio database endpoint, even if weekly monitoring is disabled. Uses the global lease and a shared 90-second HTTP deadline. Persists a sanitized success or failure, then applies retention cleanup. A failed remote check returns 200 with success:false.'
+      parameters:
+        - '$ref': '#/components/parameters/Origin'
+      requestBody:
+        required: false
+        content:
+          'application/json':
+            schema: {}
+            example: {}
+        description: 'The handler does not parse this body. Origin and Content-Type: application/json remain mandatory; send {} in API clients so the media type is included.'
+      responses:
+        '200':
+          description: 'Request completed.'
+          headers:
+            Cache-Control:
+              '$ref': '#/components/headers/NoStore'
+          content:
+            'application/json':
+              schema:
+                '$ref': '#/components/schemas/ManualCheck'
+        '401':
+          '$ref': '#/components/responses/Unauthorized'
+        '403':
+          '$ref': '#/components/responses/ForbiddenOrigin'
+        '404':
+          '$ref': '#/components/responses/NotFound'
+        '409':
+          '$ref': '#/components/responses/Conflict'
+        '415':
+          '$ref': '#/components/responses/UnsupportedMediaType'
+        '500':
+          '$ref': '#/components/responses/ServerError'
+  '/checks':
+    get:
+      tags:
+        - 'Executions'
+      operationId: 'listChecks'
+      summary: 'Read recent execution history'
+      description: 'Latest 100 records from the retained history. Retention cleanup removes records older than 90 days on successful login, manual checks and scheduled runs; cleanup is not performed by this GET.'
+      responses:
+        '200':
+          description: 'Request completed.'
+          headers:
+            Cache-Control:
+              '$ref': '#/components/headers/NoStore'
+          content:
+            'application/json':
+              schema:
+                '$ref': '#/components/schemas/History'
+        '401':
+          '$ref': '#/components/responses/Unauthorized'
+        '500':
+          '$ref': '#/components/responses/ServerError'
+  '/cron':
+    get:
+      tags:
+        - 'Scheduling'
+      operationId: 'runScheduledChecks'
+      summary: 'Execute the current weekly batch'
+      description: 'Protected only by CRON_SECRET, not administrator cookies or Origin. Intended for Monday 12:00 UTC delivery in production. Acquires the execution lease, processes enabled projects in a pool of at most four, and records individual results. Completed weekly slots are no-ops; incomplete slots resume projects without recorded results. Failed recorded checks are not repeated by same-slot cron invocations. Calling this endpoint can contact all enabled portfolio APIs. Non-GET methods return 405; no such method is an implemented operation.'
+      security:
+        - CronBearer: []
+      responses:
+        '200':
+          description: 'Request completed.'
+          headers:
+            Cache-Control:
+              '$ref': '#/components/headers/NoStore'
+          content:
+            'application/json':
+              schema:
+                '$ref': '#/components/schemas/CronSummary'
+        '401':
+          '$ref': '#/components/responses/Unauthorized'
+        '409':
+          '$ref': '#/components/responses/Conflict'
+        '500':
+          '$ref': '#/components/responses/ServerError'
+components:
+  securitySchemes:
+    SessionCookie:
+      type: 'apiKey'
+      in: 'cookie'
+      name: 'nudge_session'
+      description: 'Opaque 64-character hex session token from POST /auth/login. HttpOnly, SameSite=Strict, Secure on production. Session expiry is fixed at 7 days, or 30 days with rememberMe:true. Logout and administrator-hash rotation revoke validity.'
+    CronBearer:
+      type: 'http'
+      scheme: 'bearer'
+      bearerFormat: 'CRON_SECRET'
+      description: 'The server CRON_SECRET, at least 32 characters. Not a JWT or a portfolio authentication token.'
+  parameters:
+    Origin:
+      name: 'Origin'
+      in: 'header'
+      required: true
+      description: 'Exact trusted browser origin (scheme + host + optional port, without /api). Must match APP_ORIGIN, or the Vercel-supplied production origin in production. Browsers set this automatically and cannot override it. CLI clients must supply it.'
+      schema:
+        type: 'string'
+        format: 'uri'
+      example: 'http://localhost:5173'
+    ProjectId:
+      name: 'id'
+      in: 'path'
+      required: true
+      description: 'Identifier generated as a UUID. The actual route matches exactly 36 lowercase hexadecimal/hyphen characters.'
+      schema:
+        type: 'string'
+        pattern: '^[a-f0-9-]{36}$'
+      example: '00000000-0000-4000-8000-000000000001'
+  headers:
+    NoStore:
+      description: 'API responses are not cached.'
+      schema:
+        type: 'string'
+        const: 'no-store'
+    SessionCookie:
+      description: 'Opaque session cookie; Max-Age 604800 by default or 2592000 with rememberMe:true. Secure is present on Vercel/HTTPS, omitted only for local HTTP.'
+      schema:
+        type: 'string'
+      example: 'nudge_session=0000000000000000000000000000000000000000000000000000000000000000; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000; Secure'
+    ExpiredSessionCookie:
+      description: 'Expires the same host-scoped cookie with Max-Age=0.'
+      schema:
+        type: 'string'
+      example: 'nudge_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0; Secure'
+  responses:
+    BadRequest:
+      description: 'Malformed/missing JSON or failed validation.'
+      headers:
+        Cache-Control:
+          '$ref': '#/components/headers/NoStore'
+      content:
+        'application/json':
+          schema:
+            '$ref': '#/components/schemas/Error'
+          example:
+            error: 'Provide an administrator password (at most 1024 characters).'
+    Unauthorized:
+      description: 'Missing, invalid or expired session; for login, incorrect password; for cron, invalid bearer secret.'
+      headers:
+        Cache-Control:
+          '$ref': '#/components/headers/NoStore'
+      content:
+        'application/json':
+          schema:
+            '$ref': '#/components/schemas/Error'
+          example:
+            error: 'Please sign in to continue.'
+    ForbiddenOrigin:
+      description: 'Browser Origin is missing or not in the exact trusted production/local origin set.'
+      headers:
+        Cache-Control:
+          '$ref': '#/components/headers/NoStore'
+      content:
+        'application/json':
+          schema:
+            '$ref': '#/components/schemas/Error'
+          example:
+            error: 'Request origin is not allowed.'
+    NotFound:
+      description: 'Project or route not found. IDs not matching the route pattern produce an endpoint-not-found response.'
+      headers:
+        Cache-Control:
+          '$ref': '#/components/headers/NoStore'
+      content:
+        'application/json':
+          schema:
+            '$ref': '#/components/schemas/Error'
+          example:
+            error: 'Project not found.'
+    Conflict:
+      description: 'Another execution holds the global lease, or creation would exceed the 10-project cap.'
+      headers:
+        Cache-Control:
+          '$ref': '#/components/headers/NoStore'
+      content:
+        'application/json':
+          schema:
+            '$ref': '#/components/schemas/Error'
+          example:
+            error: 'Another check is running. Try again shortly.'
+    PayloadTooLarge:
+      description: 'Incoming JSON body exceeds 32768 bytes.'
+      headers:
+        Cache-Control:
+          '$ref': '#/components/headers/NoStore'
+      content:
+        'application/json':
+          schema:
+            '$ref': '#/components/schemas/Error'
+          example:
+            error: 'Request body exceeds 32 KB.'
+    UnsupportedMediaType:
+      description: 'A browser write must declare application/json, even when its body is ignored.'
+      headers:
+        Cache-Control:
+          '$ref': '#/components/headers/NoStore'
+      content:
+        'application/json':
+          schema:
+            '$ref': '#/components/schemas/Error'
+          example:
+            error: 'Use application/json.'
+    RateLimited:
+      description: 'The global five-attempt, fifteen-minute login bucket is exhausted. The server does not emit Retry-After.'
+      headers:
+        Cache-Control:
+          '$ref': '#/components/headers/NoStore'
+      content:
+        'application/json':
+          schema:
+            '$ref': '#/components/schemas/Error'
+          example:
+            error: 'Too many sign-in attempts. Try again in 15 minutes.'
+    ServerError:
+      description: 'Unexpected server, database or configuration failure. Details are deliberately suppressed.'
+      headers:
+        Cache-Control:
+          '$ref': '#/components/headers/NoStore'
+      content:
+        'application/json':
+          schema:
+            '$ref': '#/components/schemas/Error'
+          example:
+            error: 'The server could not complete this request. Check server configuration and database connectivity.'
+  schemas:
+    Error:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        error:
+          type: 'string'
+          description: 'Controlled error message. Raw exception details and external response bodies are not returned.'
+      required:
+        - 'error'
+    EpochMilliseconds:
+      type: 'integer'
+      format: 'int64'
+      minimum: 0
+      description: 'Unix timestamp in milliseconds, not seconds.'
+      examples:
+        - 1794787200000
+    JsonBody:
+      type: 'object'
+      additionalProperties: true
+      description: 'JSON object, at most 8192 UTF-16 code units after JSON.stringify. This serialized-size limit is enforced by the server, not expressible with maxProperties.'
+      x-max-serialized-utf16-code-units: 8192
+    EndpointPath:
+      type: 'string'
+      minLength: 1
+      maxLength: 512
+      pattern: "^/(?!/)[^\\\\\\r\\n#]*$"
+      description: 'Absolute path on the configured API origin. No protocol-relative URL, backslash, CR/LF or fragment.'
+      examples:
+        - '/api/me'
+    CredentialField:
+      type: 'string'
+      pattern: '^[a-zA-Z][a-zA-Z0-9_]{0,63}$'
+      maxLength: 64
+      description: 'Flat JSON field name. constructor, prototype and __proto__ are rejected. Username and password fields must differ.'
+      not:
+        enum:
+          - 'constructor'
+          - 'prototype'
+          - '__proto__'
+    ProjectConfig:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        baseUrl:
+          type: 'string'
+          format: 'uri'
+          maxLength: 512
+          description: 'HTTPS origin only, port 443, optional trailing slash. No embedded credentials, path prefix, query or fragment. Public-address restrictions are enforced when executing, including DNS validation and IP pinning.'
+          examples:
+            - 'https://api.example.com'
+        authPath:
+          '$ref': '#/components/schemas/EndpointPath'
+        authMethod:
+          type: 'string'
+          enum:
+            - 'POST'
+            - 'PUT'
+          default: 'POST'
+        usernameField:
+          allOf:
+            - '$ref': '#/components/schemas/CredentialField'
+          default: 'email'
+        passwordField:
+          allOf:
+            - '$ref': '#/components/schemas/CredentialField'
+          default: 'password'
+        authMode:
+          type: 'string'
+          enum:
+            - 'bearer'
+            - 'cookie'
+          default: 'bearer'
+        tokenPath:
+          type: 'string'
+          pattern: "^[a-zA-Z0-9_]+(?:\\.[a-zA-Z0-9_]+)*$"
+          maxLength: 128
+          default: 'token'
+          description: 'Dot-separated response path for bearer authentication. Still validated for cookie authentication, although unused there.'
+        keepAlivePath:
+          '$ref': '#/components/schemas/EndpointPath'
+        keepAliveMethod:
+          type: 'string'
+          enum:
+            - 'GET'
+            - 'POST'
+          default: 'GET'
+        keepAliveBody:
+          anyOf:
+            - '$ref': '#/components/schemas/JsonBody'
+            - type: 'null'
+          default: null
+          description: 'Optional POST JSON. GET ignores this value. Ordinary configuration, not encrypted: do not include secrets.'
+      required:
+        - 'baseUrl'
+        - 'authPath'
+        - 'keepAlivePath'
+      description: 'Validated API configuration. Omitted optional fields receive server defaults. Credential field names must differ.'
+    NormalizedProjectConfig:
+      allOf:
+        - '$ref': '#/components/schemas/ProjectConfig'
+        - type: 'object'
+          required:
+            - 'baseUrl'
+            - 'authPath'
+            - 'authMethod'
+            - 'usernameField'
+            - 'passwordField'
+            - 'authMode'
+            - 'tokenPath'
+            - 'keepAlivePath'
+            - 'keepAliveMethod'
+            - 'keepAliveBody'
+      description: 'Persisted configuration returned with every defaulted field present.'
+    ProjectWriteRequest:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        name:
+          type: 'string'
+          minLength: 1
+          maxLength: 80
+          description: 'Trimmed before validation; 1–80 characters after trimming.'
+        enabled:
+          type: 'boolean'
+          default: true
+        config:
+          '$ref': '#/components/schemas/ProjectConfig'
+        username:
+          type: 'string'
+          minLength: 1
+          maxLength: 320
+          writeOnly: true
+          description: 'Disposable username/email; not constrained to email syntax. Stored encrypted and never returned.'
+        password:
+          type: 'string'
+          minLength: 1
+          maxLength: 1024
+          format: 'password'
+          writeOnly: true
+          description: 'Disposable account password. Stored encrypted and never returned.'
+        authBody:
+          allOf:
+            - '$ref': '#/components/schemas/JsonBody'
+          writeOnly: true
+          description: 'Encrypted additional authentication JSON. Credential fields override matching keys. Omit on update to preserve; {} explicitly clears previous extra fields.'
+      required:
+        - 'name'
+        - 'config'
+      description: 'Full editable configuration, not an arbitrary partial update. Omit saved secrets to keep them. Empty strings are invalid replacements. enabled defaults to true when omitted.'
+    CreateProjectRequest:
+      allOf:
+        - '$ref': '#/components/schemas/ProjectWriteRequest'
+        - type: 'object'
+          required:
+            - 'username'
+            - 'password'
+      description: 'Creating a project requires the disposable username and password.'
+    ToggleProjectRequest:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        enabled:
+          type: 'boolean'
+      required:
+        - 'enabled'
+      description: 'Exactly one key. If other keys are present, the server interprets the payload as a full edit instead.'
+    PatchProjectRequest:
+      oneOf:
+        - '$ref': '#/components/schemas/ProjectWriteRequest'
+        - '$ref': '#/components/schemas/ToggleProjectRequest'
+    TestProjectRequest:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        name:
+          type: 'string'
+          minLength: 1
+          maxLength: 80
+          description: 'Trimmed before validation; 1–80 characters after trimming.'
+        enabled:
+          type: 'boolean'
+          default: true
+        config:
+          '$ref': '#/components/schemas/ProjectConfig'
+        username:
+          type: 'string'
+          minLength: 1
+          maxLength: 320
+          writeOnly: true
+          description: 'Disposable username/email; not constrained to email syntax. Stored encrypted and never returned.'
+        password:
+          type: 'string'
+          minLength: 1
+          maxLength: 1024
+          format: 'password'
+          writeOnly: true
+          description: 'Disposable account password. Stored encrypted and never returned.'
+        authBody:
+          allOf:
+            - '$ref': '#/components/schemas/JsonBody'
+          writeOnly: true
+          description: 'Encrypted additional authentication JSON. Credential fields override matching keys. Omit on update to preserve; {} explicitly clears previous extra fields.'
+        id:
+          type: 'string'
+          description: 'Existing project identifier to recover saved credentials. Must be a string if present. A nonempty unknown identifier returns 404.'
+      required:
+        - 'name'
+        - 'config'
+      description: 'Same configuration as a project edit, with an optional existing id. Without a nonempty id, username and password are required. No project or history records are saved.'
+      anyOf:
+        - required:
+            - 'username'
+            - 'password'
+        - required:
+            - 'id'
+          properties:
+            id:
+              type: 'string'
+              minLength: 1
+    LoginRequest:
+      type: 'object'
+      required:
+        - 'password'
+      properties:
+        password:
+          type: 'string'
+          minLength: 1
+          maxLength: 1024
+          format: 'password'
+          writeOnly: true
+          description: 'Plaintext administrator password corresponding to ADMIN_PASSWORD_HASH. Do not send the Argon2id hash.'
+        rememberMe:
+          type: 'boolean'
+          default: false
+          description: 'True creates a fixed 30-day cookie and database session; false/omitted keeps 7 days. Existing sessions are not extended.'
+      description: 'Login ignores additional properties. rememberMe must be a JSON boolean when supplied.'
+    SessionStatus:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        authenticated:
+          type: 'boolean'
+      required:
+        - 'authenticated'
+    LoginSuccess:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        authenticated:
+          type: 'boolean'
+          const: true
+      required:
+        - 'authenticated'
+    LogoutSuccess:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        authenticated:
+          type: 'boolean'
+          const: false
+      required:
+        - 'authenticated'
+    Ok:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        ok:
+          type: 'boolean'
+          const: true
+      required:
+        - 'ok'
+    CheckResult:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        success:
+          type: 'boolean'
+        error:
+          anyOf:
+            - type: 'string'
+              description: 'Sanitized failure description; normally null on success.'
+            - type: 'null'
+        durationMs:
+          type: 'integer'
+          format: 'int64'
+          minimum: 0
+          description: 'Execution duration in milliseconds. HTTP work is bounded by a shared 90-second deadline.'
+      required:
+        - 'success'
+        - 'error'
+        - 'durationMs'
+    LastCheck:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        startedAt:
+          '$ref': '#/components/schemas/EpochMilliseconds'
+        success:
+          type: 'boolean'
+        error:
+          anyOf:
+            - type: 'string'
+            - type: 'null'
+        durationMs:
+          type: 'integer'
+          format: 'int64'
+          minimum: 0
+      required:
+        - 'startedAt'
+        - 'success'
+        - 'error'
+        - 'durationMs'
+    Project:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        id:
+          type: 'string'
+          format: 'uuid'
+          readOnly: true
+        name:
+          type: 'string'
+        enabled:
+          type: 'boolean'
+        config:
+          '$ref': '#/components/schemas/NormalizedProjectConfig'
+        hasPassword:
+          type: 'boolean'
+          const: true
+          readOnly: true
+        hasAuthBody:
+          type: 'boolean'
+          const: true
+          readOnly: true
+          description: 'Always true for stored projects, including those with an empty extra-authentication object. Does not expose or imply nonempty contents.'
+        createdAt:
+          '$ref': '#/components/schemas/EpochMilliseconds'
+        updatedAt:
+          '$ref': '#/components/schemas/EpochMilliseconds'
+        lastCheck:
+          anyOf:
+            - '$ref': '#/components/schemas/LastCheck'
+            - type: 'null'
+      required:
+        - 'id'
+        - 'name'
+        - 'enabled'
+        - 'config'
+        - 'hasPassword'
+        - 'hasAuthBody'
+        - 'createdAt'
+        - 'updatedAt'
+        - 'lastCheck'
+      description: 'Public project projection. No username, password, extra authentication JSON, ciphertext or recovered credentials are returned.'
+    SavedProject:
+      allOf:
+        - '$ref': '#/components/schemas/Project'
+        - type: 'object'
+          properties:
+            lastCheck:
+              type: 'null'
+      description: 'Create/full-edit response uses the bare stored project and always has lastCheck:null. GET /projects populates the actual latest retained result.'
+    PatchProjectResponse:
+      oneOf:
+        - '$ref': '#/components/schemas/SavedProject'
+        - '$ref': '#/components/schemas/Ok'
+    LastScheduledRun:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        startedAt:
+          '$ref': '#/components/schemas/EpochMilliseconds'
+        finishedAt:
+          anyOf:
+            - '$ref': '#/components/schemas/EpochMilliseconds'
+            - type: 'null'
+      required:
+        - 'startedAt'
+        - 'finishedAt'
+    ProjectList:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        projects:
+          type: 'array'
+          items:
+            '$ref': '#/components/schemas/Project'
+          maxItems: 10
+        nextExecution:
+          type: 'string'
+          format: 'date-time'
+          description: 'Next expected Monday at noon UTC. An expectation, not a guaranteed delivery time.'
+        lastScheduled:
+          anyOf:
+            - '$ref': '#/components/schemas/LastScheduledRun'
+            - type: 'null'
+      required:
+        - 'projects'
+        - 'nextExecution'
+        - 'lastScheduled'
+    ManualCheck:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        success:
+          type: 'boolean'
+        error:
+          anyOf:
+            - type: 'string'
+              description: 'Sanitized failure description; normally null on success.'
+            - type: 'null'
+        durationMs:
+          type: 'integer'
+          format: 'int64'
+          minimum: 0
+          description: 'Execution duration in milliseconds. HTTP work is bounded by a shared 90-second deadline.'
+        id:
+          type: 'string'
+          format: 'uuid'
+        projectId:
+          type: 'string'
+          format: 'uuid'
+        startedAt:
+          '$ref': '#/components/schemas/EpochMilliseconds'
+        trigger:
+          type: 'string'
+          enum:
+            - 'manual'
+      required:
+        - 'success'
+        - 'error'
+        - 'durationMs'
+        - 'id'
+        - 'projectId'
+        - 'startedAt'
+        - 'trigger'
+    HistoryCheck:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        success:
+          type: 'boolean'
+        error:
+          anyOf:
+            - type: 'string'
+              description: 'Sanitized failure description; normally null on success.'
+            - type: 'null'
+        durationMs:
+          type: 'integer'
+          format: 'int64'
+          minimum: 0
+          description: 'Execution duration in milliseconds. HTTP work is bounded by a shared 90-second deadline.'
+        id:
+          type: 'string'
+          format: 'uuid'
+        projectId:
+          type: 'string'
+          format: 'uuid'
+        startedAt:
+          '$ref': '#/components/schemas/EpochMilliseconds'
+        trigger:
+          type: 'string'
+          enum:
+            - 'manual'
+            - 'scheduled'
+        projectName:
+          type: 'string'
+      required:
+        - 'success'
+        - 'error'
+        - 'durationMs'
+        - 'id'
+        - 'projectId'
+        - 'startedAt'
+        - 'trigger'
+        - 'projectName'
+    History:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        checks:
+          type: 'array'
+          maxItems: 100
+          items:
+            '$ref': '#/components/schemas/HistoryCheck'
+          description: 'Latest 100 retained records, ordered by started_at DESC then id DESC. No pagination or filtering parameters.'
+      required:
+        - 'checks'
+    CronSummary:
+      type: 'object'
+      additionalProperties: false
+      properties:
+        duplicate:
+          type: 'boolean'
+          description: 'True when this weekly slot was already completed; invocation counts then equal zero.'
+        slot:
+          type: 'string'
+          format: 'date-time'
+          description: 'Most recent Monday at noon UTC not later than invocation time; ISO UTC weekly deduplication key.'
+        checked:
+          type: 'integer'
+          format: 'int64'
+          minimum: 0
+          maximum: 10
+        succeeded:
+          type: 'integer'
+          format: 'int64'
+          minimum: 0
+          maximum: 10
+        failed:
+          type: 'integer'
+          format: 'int64'
+          minimum: 0
+          maximum: 10
+      required:
+        - 'duplicate'
+        - 'slot'
+        - 'checked'
+        - 'succeeded'
+        - 'failed'
+      description: 'Counts represent work performed by this invocation, not a cumulative weekly total. Recorded failures are not retried by duplicate same-slot invocations.'

@@ -37,6 +37,11 @@ const config: ZudokuConfig = {
       element: <HomePage />,
     },
     {
+      type: "link",
+      label: "Nudge",
+      to: "/api/nudge",
+    },
+    {
       type: "doc",
       file: "api/plainly",
       label: "Plainly",
@@ -72,6 +77,11 @@ const config: ZudokuConfig = {
     label: "API Catalog",
   },
   apis: [
+    {
+      type: "file",
+      input: "./apis/nudge/openapi.yaml",
+      path: "/api/nudge",
+    },
     {
       type: "file",
       input: "./apis/school-api/openapi.yaml",

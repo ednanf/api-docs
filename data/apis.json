@@ -1,5 +1,11 @@
 [
   {
+    "title": "Nudge",
+    "description": "API reference for Nudge, a portfolio health checker with scheduled executions.",
+    "href": "/api/nudge",
+    "linkLabel": "Explore API"
+  },
+  {
     "title": "Plainly",
     "description": "Product and technical overview of Plainly, a minimal productivity PWA developed with OpenAI Codex.",
     "href": "/api/plainly",
