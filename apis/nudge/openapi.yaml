@@ -954,7 +954,7 @@ components:
         nextExecution:
           type: 'string'
           format: 'date-time'
-          description: 'Next expected Monday at noon UTC. An expectation, not a guaranteed delivery time.'
+          description: 'Pending Monday at noon UTC. Advances only after a scheduled run records completion, including persisted failed check results. Missing or incomplete runs leave the date pending, which may be in the past. Manual checks do not advance it. Before any scheduled run, the first project registration anchors the initial date. Delivery time is not guaranteed.'
         lastScheduled:
           anyOf:
             - '$ref': '#/components/schemas/LastScheduledRun'
